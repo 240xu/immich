@@ -15,7 +15,13 @@ class BackgroundWorkerSettings {
   final bool requiresCharging;
   final int minimumDelaySeconds;
 
-  const BackgroundWorkerSettings({required this.requiresCharging, required this.minimumDelaySeconds});
+  final int maxUploadMinutes;
+
+  const BackgroundWorkerSettings({
+    required this.requiresCharging,
+    required this.minimumDelaySeconds,
+    required this.maxUploadMinutes,
+  });
 }
 
 @HostApi()

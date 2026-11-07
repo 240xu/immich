@@ -122,7 +122,10 @@ class BackgroundUploadService {
     }
   }
 
+  void Function(TaskStatusUpdate update)? _statusObserver;
+
   void _onUploadCallback(TaskStatusUpdate update) {
+    _statusObserver?.call(update);
     if (!_taskStatusController.isClosed) {
       _taskStatusController.add(update);
     }
@@ -175,6 +178,67 @@ class BackgroundUploadService {
       _logger.info("Enqueuing ${tasks.length} background upload tasks");
       await enqueueTasks(tasks);
     }
+  }
+
+  Future<bool> uploadBackupCandidatesAndWait(
+    String userId, {
+    Completer<void>? cancellationToken,
+    Duration timeout = const Duration(minutes: 55),
+    Duration pollInterval = const Duration(seconds: 2),
+  }) async {
+    var failed = 0;
+    _statusObserver = (update) {
+      if (update.status == TaskStatus.failed) {
+        failed++;
+      }
+    };
+
+    try {
+      await uploadBackupCandidates(userId);
+      return await _awaitQueueDrain(
+        cancellationToken: cancellationToken,
+        timeout: timeout,
+        pollInterval: pollInterval,
+        failedCount: () => failed,
+      );
+    } finally {
+      _statusObserver = null;
+    }
+  }
+
+  Future<bool> _awaitQueueDrain({
+    required Completer<void>? cancellationToken,
+    required Duration timeout,
+    required Duration pollInterval,
+    required int Function() failedCount,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (cancellationToken?.isCompleted ?? false) {
+        _logger.info("Background upload cancelled by caller");
+        return false;
+      }
+
+      final List<Task> active;
+      try {
+        active = await getActiveTasks(kBackupGroup);
+      } catch (error) {
+        _logger.warning("Unable to read active background tasks: $error");
+        return failedCount() == 0;
+      }
+
+      if (active.isEmpty) {
+        _logger.info("Background upload queue drained (failed=${failedCount()})");
+        return failedCount() == 0;
+      }
+
+      await Future<void>.delayed(pollInterval);
+    }
+
+    _logger.warning(
+      "Background upload did not finish within ${timeout.inMinutes}m (failed=${failedCount()})",
+    );
+    return false;
   }
 
   /// Cancel all ongoing background uploads and reset the upload queue
