@@ -46,4 +46,6 @@ abstract class NetworkApi {
   void setRequestHeaders(Map<String, String> headers, List<String> serverUrls, String? token);
 
   String getAppGroupId();
+
+  Map<String, String> requestAuthHeaders(String url);
 }
