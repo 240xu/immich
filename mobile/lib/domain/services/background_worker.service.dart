@@ -107,7 +107,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
             globalConfig: [
               // maxConcurrent: 6, maxConcurrentByHost(server):6, maxConcurrentByGroup: 3
               (Config.holdingQueue, (6, 6, 3)),
-              (Config.runInForegroundIfFileLargerThan, 10),
+              (Config.runInForeground, Config.always),
             ],
           ),
           FileDownloader().trackTasksInGroup(kDownloadGroupLivePhoto, markDownloadedComplete: false),
