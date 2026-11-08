@@ -12,11 +12,13 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
     private const val SHARED_PREF_LOCK_KEY = "BackgroundWorker::isLocked"
     private const val SHARED_PREF_NOTIF_TITLE_KEY = "BackgroundWorker::notificationTitle"
     private const val SHARED_PREF_NOTIF_MSG_KEY = "BackgroundWorker::notificationMessage"
+    private const val SHARED_PREF_MAX_MINUTES_KEY = "BackgroundWorker::maxUploadMinutes"
 
     private const val DEFAULT_MIN_DELAY_SECONDS = 30L
     private const val DEFAULT_REQUIRE_CHARGING = false
     private const val DEFAULT_NOTIF_TITLE = "Uploading media"
     private const val DEFAULT_NOTIF_MSG = "Checking for new assets…"
+    private const val DEFAULT_MAX_UPLOAD_MINUTES = 55
   }
 
   private val sp: SharedPreferences by lazy {
@@ -27,6 +29,7 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
     sp.edit {
       putLong(SHARED_PREF_MIN_DELAY_KEY, settings.minimumDelaySeconds)
       putBoolean(SHARED_PREF_REQUIRE_CHARGING_KEY, settings.requiresCharging)
+      putLong(SHARED_PREF_MAX_MINUTES_KEY, settings.maxUploadMinutes)
     }
   }
 
@@ -38,6 +41,10 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
       requiresCharging = sp.getBoolean(
         SHARED_PREF_REQUIRE_CHARGING_KEY,
         DEFAULT_REQUIRE_CHARGING
+      ),
+      maxUploadMinutes = sp.getLong(
+        SHARED_PREF_MAX_MINUTES_KEY,
+        DEFAULT_MAX_UPLOAD_MINUTES.toLong()
       ),
     )
   }
@@ -55,6 +62,9 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
     val message = sp.getString(SHARED_PREF_NOTIF_MSG_KEY, DEFAULT_NOTIF_MSG) ?: DEFAULT_NOTIF_MSG
     return Pair(title, message)
   }
+
+  fun getMaxUploadMinutes(): Long =
+    sp.getLong(SHARED_PREF_MAX_MINUTES_KEY, DEFAULT_MAX_UPLOAD_MINUTES.toLong())
 
   fun setLocked(paused: Boolean) {
     sp.edit {

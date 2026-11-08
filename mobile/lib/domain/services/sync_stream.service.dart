@@ -101,7 +101,11 @@ class SyncStreamService {
       await Store.put(StoreKey.syncMigrationStatus, jsonEncode(migrations));
     }
 
-    return true;
+    final syncCompleted = !isCancelled;
+    if (!syncCompleted) {
+      _logger.warning("Sync stream was cancelled before completion");
+    }
+    return syncCompleted;
   }
 
   Future<void> _runPreSyncTasks(List<String> migrations, SemVer semVer) async {

@@ -23,8 +23,8 @@ import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/services/api.service.dart';
+import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/services/auth.service.dart';
-import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:immich_mobile/services/localization.service.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
@@ -42,12 +42,13 @@ class BackgroundWorkerFgService {
   Future<void> saveNotificationMessage(String title, String body) =>
       _foregroundHostApi.saveNotificationMessage(title, body);
 
-  Future<void> configure({int? minimumDelaySeconds, bool? requireCharging}) {
+  Future<void> configure({int? minimumDelaySeconds, bool? requireCharging, int? maxUploadMinutes}) {
     final backup = SettingsRepository.instance.appConfig.backup;
     return _foregroundHostApi.configure(
       BackgroundWorkerSettings(
         minimumDelaySeconds: minimumDelaySeconds ?? backup.triggerDelay,
         requiresCharging: requireCharging ?? backup.requireCharging,
+        maxUploadMinutes: maxUploadMinutes ?? backup.maxUploadMinutes,
       ),
     );
   }
@@ -89,6 +90,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     BackgroundWorkerFlutterApi.setUp(this);
   }
 
+  bool get _backgroundSyncEnabled =>
+      SettingsRepository.instance.appConfig.backup.backgroundSyncEnabled;
+
   bool get _isBackupEnabled => SettingsRepository.instance.appConfig.backup.enabled;
 
   Future<void> init() async {
@@ -103,8 +107,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
             globalConfig: [
               // maxConcurrent: 6, maxConcurrentByHost(server):6, maxConcurrentByGroup: 3
               (Config.holdingQueue, (6, 6, 3)),
-              // On Android, if files are larger than 256MB, run in foreground service
-              (Config.runInForegroundIfFileLargerThan, 256),
+              (Config.runInForegroundIfFileLargerThan, 10),
             ],
           ),
           FileDownloader().trackTasksInGroup(kDownloadGroupLivePhoto, markDownloadedComplete: false),
@@ -125,11 +128,16 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
   @override
   Future<bool> onAndroidUpload(int? maxMinutes) async {
     final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
-    final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
+    const fallbackMinutes = 55;
+    final backupTimeout = Duration(minutes: maxMinutes ?? fallbackMinutes);
+    final syncBudget = maxMinutes != null
+        ? Duration(minutes: maxMinutes ~/ 2 < 5 ? 5 : maxMinutes ~/ 2)
+        : null;
     await _optimizeDB();
     return _backgroundLoop(
       hashTimeout: hashTimeout,
       backupTimeout: backupTimeout,
+      syncBudget: syncBudget,
       debugLabel: 'Android background upload',
     );
   }
@@ -187,18 +195,29 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     required Duration hashTimeout,
     required Duration? backupTimeout,
     required String debugLabel,
+    Duration? syncBudget,
   }) async {
     _logger.info(
-      '$debugLabel started hashTimeout: ${hashTimeout.inSeconds}s, backupTimeout: ${backupTimeout?.inMinutes ?? '~'}m',
+      '$debugLabel started hashTimeout: ${hashTimeout.inSeconds}s, '
+      'backupTimeout: ${backupTimeout?.inMinutes ?? '~'}m, '
+      'syncBudget: ${syncBudget?.inMinutes ?? '~'}m',
     );
     final sw = Stopwatch()..start();
     try {
-      if (!await _syncAssets(hashTimeout: hashTimeout)) {
-        _logger.warning("Remote sync did not complete successfully, skipping backup");
-        return true;
+      if (_backgroundSyncEnabled) {
+        await _syncAssets(hashTimeout: hashTimeout, syncBudget: syncBudget);
+        if (_isCleanedUp) {
+          return false;
+        }
+      } else {
+        _logger.info("Background sync disabled, syncing local index only");
+        await _localSyncService.sync();
+        if (_isCleanedUp) {
+          return false;
+        }
       }
 
-      final backupFuture = _handleBackup(remoteSync: Future.value(true));
+      final backupFuture = _handleBackup(remoteSync: Future.value(true), backupTimeout: backupTimeout);
       Timer? cancelTimer;
       if (backupTimeout != null) {
         cancelTimer = Timer(backupTimeout, () {
@@ -275,7 +294,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     }
   }
 
-  Future<bool> _handleBackup({required Future<bool> remoteSync}) async {
+  Future<bool> _handleBackup({required Future<bool> remoteSync, Duration? backupTimeout}) async {
     final needsRetry = await runZonedGuarded(() async {
       if (_isCleanedUp) {
         return false;
@@ -297,30 +316,46 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         return false;
       }
 
-      final uploadService = _ref?.read(foregroundUploadServiceProvider);
-      var failed = 0;
-      await uploadService?.uploadCandidates(
+      final bgUpload = _ref?.read(backgroundUploadServiceProvider);
+      if (bgUpload == null) {
+        _logger.warning("backgroundUploadService unavailable, skipping backup");
+        return false;
+      }
+      final allSucceeded = await bgUpload.uploadBackupCandidatesAndWait(
         currentUser.id,
-        _cancellationToken,
-        callbacks: UploadCallbacks(onError: (_, _) => failed++),
-        useSequentialUpload: true,
+        cancellationToken: _cancellationToken,
+        timeout: backupTimeout ?? const Duration(minutes: 55),
       );
-      _logger.info("Background backup finished, $failed uploads failed");
+      _logger.info("Background backup finished, all uploads succeeded: $allSucceeded");
       // Retry when at least one upload failed
-      return failed > 0;
+      return !allSucceeded;
     }, (error, stack) => dPrint(() => "Error in backup zone $error, $stack"));
     return needsRetry ?? true;
   }
 
-  Future<bool> _syncAssets({Duration? hashTimeout}) async {
+  Future<void> _syncAssets({Duration? hashTimeout, Duration? syncBudget}) async {
     await _localSyncService.sync();
     if (_isCleanedUp) {
-      return false;
+      return;
     }
 
-    final isSuccess = await _remoteSyncService.sync();
+    Future<bool> remoteFuture = _remoteSyncService.sync();
+    if (syncBudget != null) {
+      remoteFuture = remoteFuture.timeout(
+        syncBudget,
+        onTimeout: () {
+          _logger.warning("Remote sync exceeded budget of ${syncBudget.inMinutes}m, continuing with backup");
+          return false;
+        },
+      );
+    }
+
+    final isSuccess = await remoteFuture;
+    if (!isSuccess) {
+      _logger.warning("Remote sync did not complete, continuing with backup");
+    }
     if (_isCleanedUp) {
-      return isSuccess;
+      return;
     }
 
     var hashFuture = _hashService.hashAssets();
@@ -334,7 +369,6 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     }
 
     await hashFuture;
-    return isSuccess;
   }
 }
 
