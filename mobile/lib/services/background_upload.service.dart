@@ -86,6 +86,7 @@ abstract class UploadTaskMetadata with _$UploadTaskMetadata {
 /// This service handles asynchronous background uploads that can continue
 /// even when the app is suspended. Primarily used for iOS background backup.
 class BackgroundUploadService {
+  static const int _batchSize = 100;
   BackgroundUploadService(
     this._uploadRepository,
     this._storageRepository,
@@ -163,8 +164,7 @@ class BackgroundUploadService {
 
     _logger.info("Found ${candidates.length} backup candidates for background tasks");
 
-    const batchSize = 100;
-    final batch = candidates.take(batchSize).toList();
+    final batch = candidates.take(_batchSize).toList();
     final List<UploadTask> tasks = [];
 
     for (final asset in batch) {
@@ -205,7 +205,7 @@ class BackgroundUploadService {
       if (!drained || (cancellationToken?.isCompleted ?? false)) {
         return false;
       }
-      if (queued >= 100) {
+      if (queued >= _batchSize) {
         _logger.info("Queued a full batch, asking for another round to pick up the rest");
         return false;
       }
