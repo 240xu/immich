@@ -42,6 +42,10 @@ class NetworkApiPlugin : FlutterPlugin, ActivityAware {
 private class NetworkApiImpl(private val context: Context) : NetworkApi {
   var activity: Activity? = null
 
+  override fun requestAuthHeaders(url: String): Map<String, String> {
+    return HttpClientManager.getAuthHeaders(url)
+  }
+
   override fun getAppGroupId(): String = context.packageName
 
   override fun addCertificate(clientData: ClientCertData, callback: (Result<Unit>) -> Unit) {
