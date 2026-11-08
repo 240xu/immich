@@ -232,6 +232,7 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
             _ref
                 .read(backgroundUploadServiceProvider)
                 .uploadBackupCandidates(currentUser.id)
+                .then((_) {})
                 .onError((Object error, StackTrace stack) {
                   _log.warning("Failed to hand over the foreground backup: $error");
                 }),

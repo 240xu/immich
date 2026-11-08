@@ -278,7 +278,8 @@ class BackupNotifier extends StateNotifier<BackupState> {
         return;
       }
       _logger.info("No pending tasks, starting new upload");
-      return _backgroundUploadService.uploadBackupCandidates(userId);
+      await _backgroundUploadService.uploadBackupCandidates(userId);
+      return;
     }
 
     _logger.info("Resuming upload ${tasks.length} assets");

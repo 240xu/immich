@@ -151,14 +151,14 @@ class BackgroundUploadService {
   ///
   /// Finds backup candidates, builds upload tasks, and enqueues them
   /// for background processing.
-  Future<void> uploadBackupCandidates(String userId) async {
+  Future<int> uploadBackupCandidates(String userId) async {
     await _storageRepository.clearCache();
     shouldAbortQueuingTasks = false;
 
     final candidates = await _backupRepository.getCandidates(userId);
     if (candidates.isEmpty) {
       _logger.info("No new backup candidates found, finishing background upload");
-      return;
+      return 0;
     }
 
     _logger.info("Found ${candidates.length} backup candidates for background tasks");
@@ -178,6 +178,7 @@ class BackgroundUploadService {
       _logger.info("Enqueuing ${tasks.length} background upload tasks");
       await enqueueTasks(tasks);
     }
+    return tasks.length;
   }
 
   Future<bool> uploadBackupCandidatesAndWait(
@@ -194,7 +195,7 @@ class BackgroundUploadService {
     };
 
     try {
-      await uploadBackupCandidates(userId);
+      final queued = await uploadBackupCandidates(userId);
       final drained = await _awaitQueueDrain(
         cancellationToken: cancellationToken,
         timeout: timeout,
@@ -204,9 +205,8 @@ class BackgroundUploadService {
       if (!drained || (cancellationToken?.isCompleted ?? false)) {
         return false;
       }
-      final remaining = await _backupRepository.getCandidates(userId);
-      if (remaining.isNotEmpty) {
-        _logger.info("${remaining.length} backup candidates left, asking for another round");
+      if (queued >= 100) {
+        _logger.info("Queued a full batch, asking for another round to pick up the rest");
         return false;
       }
       return true;
