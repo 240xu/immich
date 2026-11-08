@@ -130,7 +130,9 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
    * This method acts as a bridge between the native Android background task system and Flutter.
    */
   override fun onInitialized() {
-    flutterApi?.onAndroidUpload(maxMinutesArg = 20) { handleHostResult(it) }
+    val maxMinutes = BackgroundWorkerPreferences(ctx).getMaxUploadMinutes()
+    Log.i(TAG, "Starting background upload with maxMinutes=$maxMinutes")
+    flutterApi?.onAndroidUpload(maxMinutesArg = maxMinutes) { handleHostResult(it) }
   }
 
   // TODO: Move this to a separate NotificationManager class

@@ -8,6 +8,8 @@ import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup.provider.dart';
+import 'package:immich_mobile/providers/user.provider.dart';
+import 'package:immich_mobile/services/background_upload.service.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/memory.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
@@ -218,9 +220,27 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
     }
   }
 
-  Future<void> _performPause() {
+  Future<void> _performPause() async {
     if (_ref.read(authProvider).isAuthenticated) {
-      _ref.read(backupProvider.notifier).stopForegroundBackup(reason: "the app being sent to the background");
+      final backupNotifier = _ref.read(backupProvider.notifier);
+
+      if (backupNotifier.isForegroundBackupRunning) {
+        final currentUser = _ref.read(currentUserProvider);
+        if (currentUser != null) {
+          _log.info("Handing the foreground backup over to the background service");
+          unawaited(
+            _ref
+                .read(backgroundUploadServiceProvider)
+                .uploadBackupCandidates(currentUser.id)
+                .then((_) {})
+                .onError((Object error, StackTrace stack) {
+                  _log.warning("Failed to hand over the foreground backup: $error");
+                }),
+          );
+        }
+      }
+
+      backupNotifier.stopForegroundBackup(reason: "the app being sent to the background");
 
       _ref.read(websocketProvider.notifier).disconnect();
     }

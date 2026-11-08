@@ -86,6 +86,7 @@ abstract class UploadTaskMetadata with _$UploadTaskMetadata {
 /// This service handles asynchronous background uploads that can continue
 /// even when the app is suspended. Primarily used for iOS background backup.
 class BackgroundUploadService {
+  static const int _batchSize = 100;
   BackgroundUploadService(
     this._uploadRepository,
     this._storageRepository,
@@ -122,7 +123,10 @@ class BackgroundUploadService {
     }
   }
 
+  void Function(TaskStatusUpdate update)? _statusObserver;
+
   void _onUploadCallback(TaskStatusUpdate update) {
+    _statusObserver?.call(update);
     if (!_taskStatusController.isClosed) {
       _taskStatusController.add(update);
     }
@@ -148,20 +152,19 @@ class BackgroundUploadService {
   ///
   /// Finds backup candidates, builds upload tasks, and enqueues them
   /// for background processing.
-  Future<void> uploadBackupCandidates(String userId) async {
+  Future<int> uploadBackupCandidates(String userId) async {
     await _storageRepository.clearCache();
     shouldAbortQueuingTasks = false;
 
     final candidates = await _backupRepository.getCandidates(userId);
     if (candidates.isEmpty) {
       _logger.info("No new backup candidates found, finishing background upload");
-      return;
+      return 0;
     }
 
     _logger.info("Found ${candidates.length} backup candidates for background tasks");
 
-    const batchSize = 100;
-    final batch = candidates.take(batchSize).toList();
+    final batch = candidates.take(_batchSize).toList();
     final List<UploadTask> tasks = [];
 
     for (final asset in batch) {
@@ -175,6 +178,79 @@ class BackgroundUploadService {
       _logger.info("Enqueuing ${tasks.length} background upload tasks");
       await enqueueTasks(tasks);
     }
+    return tasks.length;
+  }
+
+  Future<bool> uploadBackupCandidatesAndWait(
+    String userId, {
+    Completer<void>? cancellationToken,
+    Duration timeout = const Duration(minutes: 55),
+    Duration pollInterval = const Duration(seconds: 2),
+  }) async {
+    var failed = 0;
+    _statusObserver = (update) {
+      if (update.status == TaskStatus.failed || update.status == TaskStatus.notFound) {
+        failed++;
+      }
+    };
+
+    try {
+      final queued = await uploadBackupCandidates(userId);
+      final drained = await _awaitQueueDrain(
+        cancellationToken: cancellationToken,
+        timeout: timeout,
+        pollInterval: pollInterval,
+        failedCount: () => failed,
+      );
+      if (!drained || (cancellationToken?.isCompleted ?? false)) {
+        return false;
+      }
+      if (queued >= _batchSize) {
+        _logger.info("Queued a full batch, asking for another round to pick up the rest");
+        return false;
+      }
+      return true;
+    } finally {
+      _statusObserver = null;
+    }
+  }
+
+  Future<bool> _awaitQueueDrain({
+    required Completer<void>? cancellationToken,
+    required Duration timeout,
+    required Duration pollInterval,
+    required int Function() failedCount,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (cancellationToken?.isCompleted ?? false) {
+        _logger.info("Background upload cancelled by caller");
+        return false;
+      }
+
+      final List<Task> active;
+      try {
+        active = [
+          ...await getActiveTasks(kBackupGroup),
+          ...await getActiveTasks(kBackupLivePhotoGroup),
+        ];
+      } catch (error) {
+        _logger.warning("Unable to read active background tasks: $error");
+        return failedCount() == 0;
+      }
+
+      if (active.isEmpty) {
+        _logger.info("Background upload queue drained (failed=${failedCount()})");
+        return failedCount() == 0;
+      }
+
+      await Future<void>.delayed(pollInterval);
+    }
+
+    _logger.warning(
+      "Background upload did not finish within ${timeout.inMinutes}m (failed=${failedCount()})",
+    );
+    return false;
   }
 
   /// Cancel all ongoing background uploads and reset the upload queue

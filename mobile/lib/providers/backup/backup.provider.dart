@@ -156,6 +156,8 @@ class BackupNotifier extends StateNotifier<BackupState> {
     );
   }
 
+  bool get isForegroundBackupRunning => _cancelToken != null;
+
   void stopForegroundBackup({required String reason}) {
     if (_cancelToken != null) {
       _logger.info("Foreground backup cancelled: $reason");
@@ -276,7 +278,8 @@ class BackupNotifier extends StateNotifier<BackupState> {
         return;
       }
       _logger.info("No pending tasks, starting new upload");
-      return _backgroundUploadService.uploadBackupCandidates(userId);
+      await _backgroundUploadService.uploadBackupCandidates(userId);
+      return;
     }
 
     _logger.info("Resuming upload ${tasks.length} assets");
