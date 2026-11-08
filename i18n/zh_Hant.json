@@ -639,6 +639,8 @@
   "background_location_permission": "背景存取位置權限",
   "background_location_permission_content": "為了在背景執行時切換網路，Immich 必須始終具有精確位置存取權限，才能讀取 Wi-Fi 網路名稱",
   "background_options": "背景選項",
+  "background_sync": "背景同步",
+  "background_sync_description": "App 在背景時同步相簿、人物和回憶。關閉後背景只上傳照片，不更新中繼資料。",
   "backup": "備份",
   "backup_album_selection_page_albums_tap": "點一下以選取，點兩下以排除",
   "backup_album_selection_page_assets_scatter": "項目可以分散在多本相簿中，因此在備份過程中可以選擇納入或排除相簿。",

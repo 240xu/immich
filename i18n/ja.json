@@ -639,6 +639,8 @@
   "background_location_permission": "バックグラウンド位置情報アクセス",
   "background_location_permission_content": "正常にWi-Fiの名前(SSID)を獲得するには、アプリが常に詳細な位置情報にアクセスできる必要があります",
   "background_options": "バックグラウンドの動作オプション",
+  "background_sync": "バックグラウンド同期",
+  "background_sync_description": "アプリがバックグラウンドにある間、アルバム・人物・思い出を同期します。オフにすると写真のアップロードのみ行います。",
   "backup": "バックアップ",
   "backup_album_selection_page_albums_tap": "タップで選択、ダブルタップで除外",
   "backup_album_selection_page_assets_scatter": "写真/動画は複数のアルバムに分散している場合があります。そのため、バックアップ時にアルバムを選択・除外できます。",

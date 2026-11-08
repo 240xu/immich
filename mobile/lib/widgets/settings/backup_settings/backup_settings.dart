@@ -31,6 +31,8 @@ class BackupSettings extends StatelessWidget {
           SettingGroupTitle(title: context.t.background_options, icon: Icons.charging_station_rounded),
           const _BackupOnlyWhenChargingButton(),
           const _BackupDelaySlider(),
+          const _BackgroundSyncSwitch(),
+          const _MaxUploadMinutesSlider(),
         ],
         const Divider(),
         SettingGroupTitle(title: context.t.backup_albums_sync, icon: Icons.sync),
@@ -283,6 +285,75 @@ class _BackupDelaySlider extends ConsumerWidget {
           label: formatBackupDelaySliderValue(context, currentValue),
         ),
       ],
+    );
+  }
+}
+
+class _MaxUploadMinutesSlider extends ConsumerWidget {
+  const _MaxUploadMinutesSlider();
+
+  static const List<int> _steps = [5, 15, 30, 55, 120];
+
+  static int _toIndex(int minutes) {
+    final i = _steps.indexOf(minutes);
+    if (i >= 0) return i;
+    var best = 0;
+    for (var j = 0; j < _steps.length; j++) {
+      if ((_steps[j] - minutes).abs() < (_steps[best] - minutes).abs()) best = j;
+    }
+    return best;
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final fgService = ref.watch(backgroundWorkerFgServiceProvider);
+    final current = ref.watch(appConfigProvider.select((c) => c.backup.maxUploadMinutes));
+    final index = _toIndex(current);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 24.0, top: 8.0),
+          child: Text(
+            '后台最大运行时间：${_steps[index]} 分钟',
+            style: context.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(left: 24.0),
+          child: Text(
+            '单次后台任务最多跑多久。大视频超出会被中断，下一轮重新开始。',
+            style: context.textTheme.bodySmall,
+          ),
+        ),
+        Slider(
+          value: index.toDouble(),
+          onChanged: (_) {},
+          onChangeEnd: (double v) async {
+            final minutes = _steps[v.toInt()];
+            await ref.read(settingsProvider).write(SettingsKey.backupMaxUploadMinutes, minutes);
+            unawaited(fgService.configure(maxUploadMinutes: minutes));
+          },
+          max: (_steps.length - 1).toDouble(),
+          min: 0.0,
+          divisions: _steps.length - 1,
+          label: '${_steps[index]} 分钟',
+        ),
+      ],
+    );
+  }
+}
+
+class _BackgroundSyncSwitch extends StatelessWidget {
+  const _BackgroundSyncSwitch();
+
+  @override
+  Widget build(BuildContext context) {
+    return _BackupSwitchTile(
+      metadataKey: SettingsKey.backgroundSyncEnabled,
+      selector: (c) => c.backup.backgroundSyncEnabled,
+      title: context.t.background_sync,
+      subtitle: context.t.background_sync_description,
     );
   }
 }

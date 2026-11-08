@@ -156,6 +156,8 @@ class BackupNotifier extends StateNotifier<BackupState> {
     );
   }
 
+  bool get isForegroundBackupRunning => _cancelToken != null;
+
   void stopForegroundBackup({required String reason}) {
     if (_cancelToken != null) {
       _logger.info("Foreground backup cancelled: $reason");
