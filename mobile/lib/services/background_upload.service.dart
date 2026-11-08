@@ -195,12 +195,21 @@ class BackgroundUploadService {
 
     try {
       await uploadBackupCandidates(userId);
-      return await _awaitQueueDrain(
+      final drained = await _awaitQueueDrain(
         cancellationToken: cancellationToken,
         timeout: timeout,
         pollInterval: pollInterval,
         failedCount: () => failed,
       );
+      if (!drained || (cancellationToken?.isCompleted ?? false)) {
+        return false;
+      }
+      final remaining = await _backupRepository.getCandidates(userId);
+      if (remaining.isNotEmpty) {
+        _logger.info("${remaining.length} backup candidates left, asking for another round");
+        return false;
+      }
+      return true;
     } finally {
       _statusObserver = null;
     }

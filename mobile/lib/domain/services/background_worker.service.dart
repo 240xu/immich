@@ -329,8 +329,8 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         timeout: backupTimeout ?? const Duration(minutes: 55),
       );
       _logger.info("Background backup finished, all uploads succeeded: $allSucceeded");
-      if (_timedOut) {
-        _logger.info("Background worker hit its time limit, asking for a retry");
+      if (_timedOut && !allSucceeded) {
+        _logger.info("Background worker hit its time limit with work left, asking for a retry");
         return true;
       }
       if (_cancellationToken.isCompleted) {
