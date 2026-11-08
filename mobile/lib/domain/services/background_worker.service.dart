@@ -70,6 +70,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
   late HashService _hashService;
 
   bool _isCleanedUp = false;
+  bool _timedOut = false;
 
   BackgroundWorkerBgService({
     required this._dataController,
@@ -223,6 +224,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         cancelTimer = Timer(backupTimeout, () {
           if (!_cancellationToken.isCompleted) {
             _logger.warning("$debugLabel timed out after ${backupTimeout.inMinutes}m, cancelling backup");
+            _timedOut = true;
             _cancellationToken.complete();
           }
         });
@@ -327,7 +329,14 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         timeout: backupTimeout ?? const Duration(minutes: 55),
       );
       _logger.info("Background backup finished, all uploads succeeded: $allSucceeded");
-      // Retry when at least one upload failed
+      if (_timedOut) {
+        _logger.info("Background worker hit its time limit, asking for a retry");
+        return true;
+      }
+      if (_cancellationToken.isCompleted) {
+        _logger.info("Background worker was cancelled, not asking for a retry");
+        return false;
+      }
       return !allSucceeded;
     }, (error, stack) => dPrint(() => "Error in backup zone $error, $stack"));
     return needsRetry ?? true;
