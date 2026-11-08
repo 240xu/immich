@@ -188,7 +188,7 @@ class BackgroundUploadService {
   }) async {
     var failed = 0;
     _statusObserver = (update) {
-      if (update.status == TaskStatus.failed) {
+      if (update.status == TaskStatus.failed || update.status == TaskStatus.notFound) {
         failed++;
       }
     };
