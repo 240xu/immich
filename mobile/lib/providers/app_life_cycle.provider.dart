@@ -225,14 +225,6 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
       final backupNotifier = _ref.read(backupProvider.notifier);
 
       if (backupNotifier.isForegroundBackupRunning) {
-        try {
-          await _ref
-              .read(backgroundWorkerLockServiceProvider)
-              .unlock()
-              .timeout(const Duration(milliseconds: 1500));
-        } catch (e) {
-          _log.warning("unlock before handoff failed/timed out: $e");
-        }
         final currentUser = _ref.read(currentUserProvider);
         if (currentUser != null) {
           _log.info("Handing the foreground backup over to the background service");
