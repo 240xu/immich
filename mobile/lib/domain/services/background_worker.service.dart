@@ -352,7 +352,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     }
 
     final syncAbort = Completer<void>();
-    Future<bool> remoteFuture = _remoteSyncService.sync(abortSignal: syncAbort.future);
+    Future<bool> remoteFuture = _remoteSyncService.sync(abortSignal: syncAbort);
     if (syncBudget != null) {
       remoteFuture = remoteFuture.timeout(
         syncBudget,
