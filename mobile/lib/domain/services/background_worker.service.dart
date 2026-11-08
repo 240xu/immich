@@ -358,9 +358,6 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     if (!isSuccess) {
       _logger.warning("Remote sync did not complete, continuing with backup");
     }
-    if (!syncAbort.isCompleted) {
-      syncAbort.complete();
-    }
     if (_isCleanedUp) {
       return;
     }
