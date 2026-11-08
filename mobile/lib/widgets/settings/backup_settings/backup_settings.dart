@@ -315,14 +315,14 @@ class _MaxUploadMinutesSlider extends ConsumerWidget {
         Padding(
           padding: const EdgeInsets.only(left: 24.0, top: 8.0),
           child: Text(
-            '后台最大运行时间：${_steps[index]} 分钟',
+            context.t.background_max_minutes_title(minutes: _steps[index]),
             style: context.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
           ),
         ),
         Padding(
           padding: const EdgeInsets.only(left: 24.0),
           child: Text(
-            '单次后台任务最多跑多久。大视频超出会被中断，下一轮重新开始。',
+            context.t.background_max_minutes_description,
             style: context.textTheme.bodySmall,
           ),
         ),
@@ -337,7 +337,7 @@ class _MaxUploadMinutesSlider extends ConsumerWidget {
           max: (_steps.length - 1).toDouble(),
           min: 0.0,
           divisions: _steps.length - 1,
-          label: '${_steps[index]} 分钟',
+          label: context.t.background_max_minutes_label(minutes: _steps[index]),
         ),
       ],
     );
