@@ -43,6 +43,13 @@ void configureFileDownloaderNotifications() {
     complete: TaskNotification(t.upload_finished, t.backup_background_service_complete_notification),
     groupNotificationId: kBackupGroup,
   );
+
+  FileDownloader().configureNotificationForGroup(
+    kBackupLivePhotoGroup,
+    running: TaskNotification(t.uploading_media, t.backup_background_service_in_progress_notification),
+    complete: TaskNotification(t.upload_finished, t.backup_background_service_complete_notification),
+    groupNotificationId: kBackupGroup,
+  );
 }
 
 abstract final class Bootstrap {
