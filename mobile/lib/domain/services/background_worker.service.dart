@@ -339,12 +339,16 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       return;
     }
 
-    Future<bool> remoteFuture = _remoteSyncService.sync();
+    final syncAbort = Completer<void>();
+    Future<bool> remoteFuture = _remoteSyncService.sync(abortSignal: syncAbort.future);
     if (syncBudget != null) {
       remoteFuture = remoteFuture.timeout(
         syncBudget,
         onTimeout: () {
           _logger.warning("Remote sync exceeded budget of ${syncBudget.inMinutes}m, continuing with backup");
+          if (!syncAbort.isCompleted) {
+            syncAbort.complete();
+          }
           return false;
         },
       );
@@ -353,6 +357,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     final isSuccess = await remoteFuture;
     if (!isSuccess) {
       _logger.warning("Remote sync did not complete, continuing with backup");
+    }
+    if (!syncAbort.isCompleted) {
+      syncAbort.complete();
     }
     if (_isCleanedUp) {
       return;

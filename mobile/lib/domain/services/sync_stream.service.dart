@@ -56,7 +56,7 @@ class SyncStreamService {
 
   bool get isCancelled => _cancellation?.isCompleted ?? false;
 
-  Future<bool> sync() async {
+  Future<bool> sync({Future<void>? abortSignal}) async {
     _logger.info("Remote sync request for user");
     final serverVersion = await _api.serverInfoApi.getServerVersion();
     if (serverVersion == null) {
@@ -82,14 +82,14 @@ class SyncStreamService {
       _handleEvents,
       serverVersion: serverSemVer,
       onReset: () => shouldReset = true,
-      abortSignal: _cancellation?.future,
+      abortSignal: abortSignal ?? _cancellation?.future,
     );
     if (shouldReset) {
       _logger.info("Resetting sync state as requested by server");
       await _syncApiRepository.streamChanges(
         _handleEvents,
         serverVersion: serverSemVer,
-        abortSignal: _cancellation?.future,
+        abortSignal: abortSignal ?? _cancellation?.future,
       );
     }
 
@@ -101,7 +101,7 @@ class SyncStreamService {
       await Store.put(StoreKey.syncMigrationStatus, jsonEncode(migrations));
     }
 
-    final syncCompleted = !isCancelled;
+    final syncCompleted = !isCancelled && !(abortSignal?.isCompleted ?? false);
     if (!syncCompleted) {
       _logger.warning("Sync stream was cancelled before completion");
     }
