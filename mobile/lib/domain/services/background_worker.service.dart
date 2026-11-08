@@ -236,6 +236,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       }
     } catch (error, stack) {
       _logger.severe("Failed to complete $debugLabel", error, stack);
+      if (_cancellationToken.isCompleted && !_timedOut) {
+        return false;
+      }
       return true;
     } finally {
       sw.stop();
