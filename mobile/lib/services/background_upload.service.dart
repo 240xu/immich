@@ -221,7 +221,10 @@ class BackgroundUploadService {
 
       final List<Task> active;
       try {
-        active = await getActiveTasks(kBackupGroup);
+        active = [
+          ...await getActiveTasks(kBackupGroup),
+          ...await getActiveTasks(kBackupLivePhotoGroup),
+        ];
       } catch (error) {
         _logger.warning("Unable to read active background tasks: $error");
         return failedCount() == 0;
