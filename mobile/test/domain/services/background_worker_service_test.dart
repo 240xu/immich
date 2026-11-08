@@ -64,7 +64,7 @@ void main() {
     when(() => mockUserService.tryGetMyUser()).thenReturn(UserStub.admin);
     when(() => mockUserService.watchMyUser()).thenAnswer((_) => const Stream.empty());
     when(() => mockBackgroundUploadService.getActiveTasks(kBackupGroup)).thenAnswer((_) async => []);
-    when(() => mockBackgroundUploadService.uploadBackupCandidates(any())).thenAnswer((_) async {});
+    when(() => mockBackgroundUploadService.uploadBackupCandidates(any())).thenAnswer((_) async => 0);
     when(() => mockBackgroundUploadService.resume()).thenAnswer((_) async {});
 
     sut = BackgroundWorkerBgService(
