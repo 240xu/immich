@@ -40,6 +40,8 @@ class ApiService {
   late MemoriesApi memoriesApi;
   late SessionsApi sessionsApi;
   late TagsApi tagsApi;
+  late PasskeysApi passkeysApi;
+  late ConfigPublicApi configPublicApi;
 
   ApiService() {
     // The below line ensures that the api clients are initialized when the service is instantiated
@@ -49,7 +51,8 @@ class ApiService {
   final _log = Logger("ApiService");
 
   Future<void> updateHeaders() async {
-    await NetworkRepository.setHeaders(getRequestHeaders(), getServerUrls());
+    final token = Store.tryGet(StoreKey.accessToken);
+    await NetworkRepository.setHeaders(getRequestHeaders(), getServerUrls(), token: token);
     _apiClient.client = NetworkRepository.client;
   }
 
@@ -77,6 +80,8 @@ class ApiService {
     memoriesApi = MemoriesApi(_apiClient);
     sessionsApi = SessionsApi(_apiClient);
     tagsApi = TagsApi(_apiClient);
+    passkeysApi = PasskeysApi(_apiClient);
+    configPublicApi = ConfigPublicApi(_apiClient);
   }
 
   Future<String> resolveAndSetEndpoint(String serverUrl) async {

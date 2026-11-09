@@ -44,6 +44,14 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
 
   override fun getAppGroupId(): String = context.packageName
 
+  override fun requestAuthHeaders(url: String): Map<String, String> {
+    return HttpClientManager.getAuthHeaders(url)
+  }
+
+  override fun getCronetUserAgent(): String = HttpClientManager.getUserAgent()
+
+  override fun getCronetStoragePath(): String = HttpClientManager.getApiCronetStoragePath()
+
   override fun addCertificate(clientData: ClientCertData, callback: (Result<Unit>) -> Unit) {
     try {
       HttpClientManager.setKeyEntry(clientData.data, clientData.password.toCharArray())
@@ -83,5 +91,9 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
 
   override fun setRequestHeaders(headers: Map<String, String>, serverUrls: List<String>, token: String?) {
     HttpClientManager.setRequestHeaders(headers, serverUrls, token)
+  }
+
+  override fun clearCookies() {
+    HttpClientManager.clearCookies()
   }
 }

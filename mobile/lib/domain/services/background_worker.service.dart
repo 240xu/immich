@@ -55,6 +55,8 @@ class BackgroundWorkerFgService {
   // ignore: unused-code
   Future<void> disable() => _foregroundHostApi.disable();
 
+  Future<void> runNow() => _foregroundHostApi.runNow();
+
   Future<bool> wasLaunchedInBackground() => _foregroundHostApi.wasLaunchedInBackground();
 }
 

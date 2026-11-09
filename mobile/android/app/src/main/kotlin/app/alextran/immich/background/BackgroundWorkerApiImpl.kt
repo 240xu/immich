@@ -49,6 +49,10 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     return false
   }
 
+  override fun runNow() {
+    enqueueBackgroundWorker(ctx)
+  }
+
   companion object {
     private const val BACKGROUND_WORKER_NAME = "immich/BackgroundWorkerV1"
     private const val RETRY_WORKER_NAME = "immich/BackgroundWorkerRetryV1"

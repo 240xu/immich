@@ -66,13 +66,13 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
   override fun startWork(): ListenableFuture<Result> {
     if (!activeWorker.compareAndSet(null, this)) {
       Log.i(TAG, "Another background worker is running, skipping")
-      return Futures.immediateFuture(Result.success())
+      return Futures.immediateFuture(Result.retry())
     }
 
     if (BackgroundWorkerPreferences(ctx).isLocked() && BackgroundEngineLock.connectEngines > 0) {
       Log.i(TAG, "Foreground engine active, skipping background worker")
       activeWorker.compareAndSet(this, null)
-      return Futures.immediateFuture(Result.success())
+      return Futures.immediateFuture(Result.retry())
     }
 
     try {
