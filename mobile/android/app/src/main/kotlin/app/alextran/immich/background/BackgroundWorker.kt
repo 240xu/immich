@@ -65,14 +65,22 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
 
   override fun startWork(): ListenableFuture<Result> {
     if (!activeWorker.compareAndSet(null, this)) {
+      // Another worker already owns the upload. Reporting success keeps
+      // WorkManager's backoff from growing; the running worker is doing the work.
       Log.i(TAG, "Another background worker is running, skipping")
-      return Futures.immediateFuture(Result.retry())
+      return Futures.immediateFuture(Result.success())
     }
 
     if (BackgroundWorkerPreferences(ctx).isLocked() && BackgroundEngineLock.connectEngines > 0) {
+      // The foreground engine is mid-backup, so it is already doing what this
+      // worker would do. Returning retry() here would feed WorkManager's
+      // exponential backoff every time a foreground backup overlaps a scheduled
+      // run, pushing the next attempt out to minutes and then hours — which is
+      // how the background sync looked permanently broken. PeriodicWorker and
+      // MediaObserver pick the work up again once the app is idle.
       Log.i(TAG, "Foreground engine active, skipping background worker")
       activeWorker.compareAndSet(this, null)
-      return Futures.immediateFuture(Result.retry())
+      return Futures.immediateFuture(Result.success())
     }
 
     try {
