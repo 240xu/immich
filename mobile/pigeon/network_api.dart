@@ -48,4 +48,10 @@ abstract class NetworkApi {
   void clearCookies();
 
   String getAppGroupId();
+
+  Map<String, String> requestAuthHeaders(String url);
+
+  String getCronetUserAgent();
+
+  String getCronetStoragePath();
 }
