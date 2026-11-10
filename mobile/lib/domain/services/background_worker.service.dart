@@ -304,7 +304,13 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       await uploadService?.uploadCandidates(
         currentUser.id,
         _cancellationToken,
-        callbacks: UploadCallbacks(onError: (_, _) => failed++),
+        callbacks: UploadCallbacks(
+          onError: (_, _) => failed++,
+          // A cancelled upload never reached the server, so it must count as a
+          // failure. Without this the run reports "0 uploads failed" and the
+          // worker returns success, silently dropping the remaining assets.
+          onCancelled: (_) => failed++,
+        ),
         useSequentialUpload: true,
       );
       _logger.info("Background backup finished, $failed uploads failed");

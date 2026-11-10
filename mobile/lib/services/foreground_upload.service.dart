@@ -34,7 +34,19 @@ class UploadCallbacks {
   final void Function(String id, String errorMessage)? onError;
   final void Function(String id, double progress)? onICloudProgress;
 
-  const UploadCallbacks({this.onProgress, this.onSuccess, this.onError, this.onICloudProgress});
+  /// Invoked when an upload was aborted before completing, either because the
+  /// cancel token was triggered or because the transport gave up. This is
+  /// distinct from [onError]: a cancelled upload still means the asset was not
+  /// backed up, so callers that gate retries on the failure count must count it.
+  final void Function(String id)? onCancelled;
+
+  const UploadCallbacks({
+    this.onProgress,
+    this.onSuccess,
+    this.onError,
+    this.onICloudProgress,
+    this.onCancelled,
+  });
 }
 
 final foregroundUploadServiceProvider = Provider((ref) {
@@ -393,6 +405,7 @@ class ForegroundUploadService {
         await _handleUploadSuccess(asset, result.remoteAssetId!, callbacks);
       } else if (result.isCancelled) {
         shouldAbortUpload = true;
+        callbacks.onCancelled?.call(asset.localId!);
       } else if (result.errorMessage != null) {
         _logger.severe(
           () =>

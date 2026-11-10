@@ -1,0 +1,337 @@
+package app.alextran.immich.core
+
+import org.chromium.net.CronetEngine
+import org.chromium.net.CronetException
+import org.chromium.net.UploadDataProvider
+import org.chromium.net.UploadDataSink
+import org.chromium.net.UrlRequest
+import org.chromium.net.UrlResponseInfo
+import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.util.UUID
+import java.util.concurrent.ExecutorService
+
+/**
+ * Streams a single `multipart/form-data` upload straight from disk through Cronet.
+ *
+ * This exists because `package:cronet_http` materialises the whole request body in
+ * Dart memory (`final body = await stream.toBytes()`) before handing it to the
+ * native layer, and the JNI bridge then copies it twice more. Multi-gigabyte
+ * videos therefore cannot be uploaded through that client at all: memory use
+ * scales with file size and the process is killed part-way through.
+ *
+ * Cronet's own [UploadDataProvider] API is streaming, so driving it directly from
+ * a file keeps memory flat regardless of payload size. Everything else — PQ
+ * ClientHello, TLS, redirects, connection reuse — stays on the same engine the
+ * rest of the app uses.
+ */
+internal class StreamingFileUploader(
+  private val engine: CronetEngine,
+  private val executor: ExecutorService,
+) {
+
+  /** Outcome of one upload attempt. */
+  data class Outcome(
+    val isSuccess: Boolean,
+    val statusCode: Int,
+    val body: String?,
+    val errorMessage: String?,
+  )
+
+  /**
+   * Live requests keyed by progress key, so Dart can abort an upload when the
+   * backup is cancelled (app paused, worker stopped, user hit stop). Without this
+   * the native thread would keep uploading after the caller moved on.
+   */
+  private val activeRequests = java.util.concurrent.ConcurrentHashMap<String, UrlRequest>()
+
+  fun cancel(progressKey: String) {
+    activeRequests.remove(progressKey)?.let {
+      runCatching { it.cancel() }
+    }
+  }
+
+  /**
+   * Upload [file] to [url] as multipart/form-data.
+   *
+   * @param onProgress called with (bytesSent, totalBytes) as the body drains.
+   * @return the outcome; never throws for transport or HTTP failures.
+   */
+  fun upload(
+    url: String,
+    file: File,
+    fileName: String,
+    fileFieldName: String,
+    mimeType: String?,
+    fields: Map<String, String>,
+    onProgress: ((Long, Long) -> Unit)?,
+    progressKey: String,
+  ): Outcome {
+    if (!file.isFile) {
+      return Outcome(false, 0, null, "File not found: ${file.path}")
+    }
+
+    val boundary = "----ImmichUpload${UUID.randomUUID().toString().replace("-", "")}"
+    val header = buildMultipartHeader(boundary, fields, fileFieldName, fileName, mimeType)
+    val footer = "\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8)
+    val fileLength = file.length()
+
+    val provider = FileUploadProvider(file, header, footer, fileLength, onProgress)
+
+    val latch = java.util.concurrent.CountDownLatch(1)
+    var outcome: Outcome? = null
+    var request: UrlRequest? = null
+
+    val callback = object : UrlRequest.Callback() {
+      override fun onRedirectReceived(request: UrlRequest, info: UrlResponseInfo, newLocationUrl: String) {
+        // Follow redirects: Cronet does not do this for us by default.
+        request.followRedirect()
+      }
+
+      override fun onResponseStarted(request: UrlRequest, info: UrlResponseInfo) {
+        request.read(ByteBuffer.allocateDirect(BUFFER_SIZE))
+      }
+
+      override fun onReadCompleted(
+        request: UrlRequest,
+        info: UrlResponseInfo,
+        byteBuffer: ByteBuffer,
+      ) {
+        byteBuffer.flip()
+        if (byteBuffer.hasRemaining()) {
+          val chunk = ByteArray(byteBuffer.remaining())
+          byteBuffer.get(chunk)
+          responseBytes.write(chunk, 0, chunk.size)
+        }
+        byteBuffer.clear()
+        request.read(byteBuffer)
+      }
+
+      override fun onSucceeded(request: UrlRequest, info: UrlResponseInfo) {
+        outcome = Outcome(
+          isSuccess = info.httpStatusCode in 200..299,
+          statusCode = info.httpStatusCode,
+          body = responseBytes.toString(Charsets.UTF_8),
+          errorMessage = null,
+        )
+        latch.countDown()
+      }
+
+      override fun onFailed(request: UrlRequest, info: UrlResponseInfo?, error: CronetException) {
+        outcome = Outcome(false, info?.httpStatusCode ?: 0, null, error.toString())
+        latch.countDown()
+      }
+
+      override fun onCanceled(request: UrlRequest, info: UrlResponseInfo?) {
+        outcome = Outcome(false, info?.httpStatusCode ?: 0, null, "Upload cancelled")
+        latch.countDown()
+      }
+
+      private val responseBytes = java.io.ByteArrayOutputStream()
+    }
+
+    return try {
+      val builder = engine.newUrlRequestBuilder(url, callback, executor)
+
+      // Auth and any other persisted headers. Cronet strips these from the URL
+      // rather than reading them off the request, so set them explicitly.
+      HttpClientManager.getAuthHeaders(url).forEach { (key, value) ->
+        if (!key.equals("content-length", ignoreCase = true) &&
+          !key.equals("content-type", ignoreCase = true)
+        ) {
+          builder.addHeader(key, value)
+        }
+      }
+      builder.addHeader("Content-Type", "multipart/form-data; boundary=$boundary")
+
+      // Cronet only calls rewind() when it needs to replay the body (redirects,
+      // auth challenges). Prime the provider so the first read has data.
+      provider.resetForFirstRead()
+
+      request = builder
+        .setHttpMethod("POST")
+        .setUploadDataProvider(provider, executor)
+        .build()
+      activeRequests[progressKey] = request!!
+      request.start()
+
+      // A missing callback would otherwise wedge the calling thread forever.
+      val finished = latch.await(UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+      if (!finished) {
+        request.cancel()
+        return Outcome(false, 0, null, "Upload timed out")
+      }
+      outcome ?: Outcome(false, 0, null, "Upload finished with no result")
+    } catch (e: Exception) {
+      Outcome(false, 0, null, e.toString())
+    } finally {
+      activeRequests.remove(progressKey)
+      provider.closeStream()
+    }
+  }
+
+  private fun buildMultipartHeader(
+    boundary: String,
+    fields: Map<String, String>,
+    fileFieldName: String,
+    fileName: String,
+    mimeType: String?,
+  ): ByteArray {
+    val out = StringBuilder()
+    fields.forEach { (name, value) ->
+      out.append("--").append(boundary).append("\r\n")
+      out.append("Content-Disposition: form-data; name=\"").append(name.escapeQuotes()).append("\"\r\n")
+      out.append("\r\n")
+      out.append(value).append("\r\n")
+    }
+    out.append("--").append(boundary).append("\r\n")
+    out.append("Content-Disposition: form-data; name=\"")
+      .append(fileFieldName.escapeQuotes())
+      .append("\"; filename=\"")
+      .append(fileName.escapeQuotes())
+      .append("\"\r\n")
+    out.append("Content-Type: ").append(mimeType ?: "application/octet-stream").append("\r\n")
+    out.append("\r\n")
+    return out.toString().toByteArray(Charsets.UTF_8)
+  }
+
+  private fun String.escapeQuotes(): String = replace("\\", "\\\\").replace("\"", "\\\"")
+
+  /**
+   * Feeds header, file bytes, then footer to Cronet without ever holding more
+   * than one buffer worth of the payload in memory.
+   */
+  private class FileUploadProvider(
+    private val file: File,
+    private val header: ByteArray,
+    private val footer: ByteArray,
+    private val fileLength: Long,
+    private val onProgress: ((Long, Long) -> Unit)?,
+  ) : UploadDataProvider() {
+
+    private val totalLength: Long = header.size.toLong() + fileLength + footer.size.toLong()
+
+    private var stream: FileInputStream? = null
+    private var headerRemaining = 0
+    private var fileRemaining = 0L
+    private var footerRemaining = 0
+    private var bytesSent = 0L
+    private var lastReported = 0L
+    private var scratch = ByteArray(0)
+
+    override fun getLength(): Long = totalLength
+
+    override fun rewind(uploadDataSink: UploadDataSink) {
+      openStream()
+    }
+
+    /// Primes the provider for the first read. Cronet only calls [rewind] itself
+    /// when it must replay the body, so the very first read needs this too.
+    fun resetForFirstRead() {
+      openStream()
+    }
+
+    private fun openStream() {
+      closeStream()
+      stream = FileInputStream(file)
+      headerRemaining = header.size
+      fileRemaining = fileLength
+      footerRemaining = footer.size
+      bytesSent = 0
+      lastReported = 0
+    }
+
+
+    override fun read(sink: UploadDataSink, buffer: ByteBuffer) {
+      try {
+        var wrote = 0
+        val capacity = buffer.remaining()
+
+        // 1) multipart preamble (field headers + file part header)
+        if (headerRemaining > 0 && wrote < capacity) {
+          val chunk = minOf(headerRemaining, capacity)
+          val offset = header.size - headerRemaining
+          buffer.put(header, offset, chunk)
+          headerRemaining -= chunk
+          wrote += chunk
+        }
+
+        // 2) file payload, read straight off disk
+        if (fileRemaining > 0 && wrote < capacity) {
+          val want = minOf(fileRemaining, (capacity - wrote).toLong()).toInt()
+          // Cronet hands us a direct buffer, which has no backing array, so read
+          // into a scratch array and copy across.
+          if (scratch.size < want) {
+            scratch = ByteArray(want)
+          }
+          val read = stream?.read(scratch, 0, want) ?: -1
+          if (read <= 0) {
+            // Disk truncated underneath us; fail loudly rather than sending a
+            // short body that the server would reject with a confusing error.
+            sink.onReadError(IOException("Unexpected EOF reading ${file.path}"))
+            return
+          }
+          buffer.put(scratch, 0, read)
+          fileRemaining -= read
+          wrote += read
+        }
+
+        // 3) closing boundary
+        if (footerRemaining > 0 && wrote < capacity) {
+          val chunk = minOf(footerRemaining, capacity)
+          val offset = footer.size - footerRemaining
+          buffer.put(footer, offset, chunk)
+          footerRemaining -= chunk
+          wrote += chunk
+        }
+
+        if (wrote == 0) {
+          // No bytes left to hand over. Cronet needs the final-chunk flag set so
+          // it can close out the request instead of asking again.
+          sink.onReadSucceeded(true)
+          return
+        }
+
+        bytesSent += wrote
+        onProgress?.let { report(it) }
+        sink.onReadSucceeded(false)
+      } catch (e: IOException) {
+        sink.onReadError(e)
+      } catch (e: Exception) {
+        sink.onReadError(IOException(e))
+      }
+    }
+
+    private fun report(cb: (Long, Long) -> Unit) {
+      // Throttle: progress callbacks cross the platform channel, so firing one
+      // per 64 KiB buffer would flood the message loop on a large upload.
+      if (bytesSent - lastReported >= PROGRESS_INTERVAL || bytesSent >= totalLength) {
+        lastReported = bytesSent
+        cb(bytesSent, totalLength)
+      }
+    }
+
+    fun closeStream() {
+      try {
+        stream?.close()
+      } catch (_: IOException) {
+      }
+      stream = null
+    }
+
+    override fun close() {
+      closeStream()
+    }
+
+    companion object {
+      private const val PROGRESS_INTERVAL = 1L * 1024 * 1024
+    }
+  }
+
+  companion object {
+    private const val BUFFER_SIZE = 256 * 1024
+    private const val UPLOAD_TIMEOUT_SECONDS = 60L * 30
+  }
+}

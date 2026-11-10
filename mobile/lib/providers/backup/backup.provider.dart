@@ -76,6 +76,14 @@ class BackupNotifier extends StateNotifier<BackupState> {
   final UploadSpeedManager _uploadSpeedManager;
   Completer<void>? _cancelToken;
 
+  // Which user the in-flight foreground backup belongs to, and a handle on that
+  // run. Resume and splash can both ask for a backup of the same user at almost
+  // the same time; without this the second call cancels the first run's token and
+  // starts a duplicate upload pass over the same assets. The two passes then
+  // overwrite each other's progress and race on the same rows.
+  String? _activeBackupUserId;
+  Future<void>? _activeBackupRun;
+
   final _logger = Logger("BackupNotifier");
 
   /// Remove upload item from state
@@ -123,6 +131,16 @@ class BackupNotifier extends StateNotifier<BackupState> {
   }
 
   Future<void> startForegroundBackup(String userId) async {
+    // A resume and a splash resume can both land here for the same user within
+    // milliseconds. Letting the second one through would cancel the first run's
+    // token and then immediately start a duplicate pass, which shows up as the
+    // progress bar jumping around. Join the run that is already going instead.
+    final activeRun = _activeBackupRun;
+    if (activeRun != null && _activeBackupUserId == userId) {
+      _logger.info("Foreground backup for $userId already running, joining it");
+      return activeRun;
+    }
+
     // Cancel any existing backup before starting a new one
     if (_cancelToken != null) {
       stopForegroundBackup(reason: "restarting the backup");
@@ -134,26 +152,44 @@ class BackupNotifier extends StateNotifier<BackupState> {
     final cancelToken = Completer<void>();
     _cancelToken = cancelToken;
 
-    // TODO: Once the tmp cleanup is fixed, revert this and handle it differently.
-    // Since we clean up tmp files whenever a foreground upload starts, we need to cancel ongoing background uploads.
-    if (CurrentPlatform.isIOS) {
-      await _backgroundUploadService.cancel();
+    // Claim the slot before the first await so a call arriving during the
+    // backup-status recount still joins this run instead of cancelling it.
+    final runGuard = Completer<void>();
+    _activeBackupUserId = userId;
+    _activeBackupRun = runGuard.future;
+
+    try {
+      // TODO: Once the tmp cleanup is fixed, revert this and handle it differently.
+      // Since we clean up tmp files whenever a foreground upload starts, we need to cancel ongoing background uploads.
+      if (CurrentPlatform.isIOS) {
+        await _backgroundUploadService.cancel();
+      }
+
+      // Re-baseline the counters against the same DB read that feeds this run's candidate list,
+      // otherwise a resume counts duplicate successes against the old baseline (#26215).
+      await getBackupStatus(userId);
+
+      await _foregroundUploadService.uploadCandidates(
+        userId,
+        cancelToken,
+        callbacks: UploadCallbacks(
+          onProgress: _handleForegroundBackupProgress,
+          onSuccess: _handleForegroundBackupSuccess,
+          onError: _handleForegroundBackupError,
+          onICloudProgress: _handleICloudProgress,
+        ),
+      );
+    } finally {
+      // Release the slot only if it is still ours: a pause may have stopped this
+      // run and a newer one may already own it.
+      if (identical(_activeBackupRun, runGuard.future)) {
+        _activeBackupRun = null;
+        _activeBackupUserId = null;
+      }
+      if (!runGuard.isCompleted) {
+        runGuard.complete();
+      }
     }
-
-    // Re-baseline the counters against the same DB read that feeds this run's candidate list,
-    // otherwise a resume counts duplicate successes against the old baseline (#26215).
-    await getBackupStatus(userId);
-
-    return _foregroundUploadService.uploadCandidates(
-      userId,
-      cancelToken,
-      callbacks: UploadCallbacks(
-        onProgress: _handleForegroundBackupProgress,
-        onSuccess: _handleForegroundBackupSuccess,
-        onError: _handleForegroundBackupError,
-        onICloudProgress: _handleICloudProgress,
-      ),
-    );
   }
 
   void stopForegroundBackup({required String reason}) {
@@ -162,6 +198,11 @@ class BackupNotifier extends StateNotifier<BackupState> {
     }
     _cancelToken?.complete();
     _cancelToken = null;
+    // Drop the active-run slot too. The run is being cancelled, so a resume that
+    // arrives before the old future unwinds must start a fresh run rather than
+    // joining one that is already shutting down.
+    _activeBackupRun = null;
+    _activeBackupUserId = null;
     _uploadSpeedManager.clear();
     state = state.copyWith(uploadItems: {}, iCloudDownloadProgress: {});
   }

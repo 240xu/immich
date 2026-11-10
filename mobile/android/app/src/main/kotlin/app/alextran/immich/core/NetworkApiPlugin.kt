@@ -11,15 +11,24 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 
 class NetworkApiPlugin : FlutterPlugin, ActivityAware {
   private var networkApi: NetworkApiImpl? = null
+  private var progressApi: StreamingUploadProgressApi? = null
 
   override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-    networkApi = NetworkApiImpl(binding.applicationContext)
-    NetworkApi.setUp(binding.binaryMessenger, networkApi)
+    val impl = NetworkApiImpl(binding.applicationContext)
+    // Progress is pushed back through a FlutterApi bound to this engine's
+    // messenger, so it must be created per-attachment.
+    val progress = StreamingUploadProgressApi(binding.binaryMessenger)
+    impl.progressApi = progress
+    networkApi = impl
+    progressApi = progress
+    NetworkApi.setUp(binding.binaryMessenger, impl)
   }
 
   override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
     NetworkApi.setUp(binding.binaryMessenger, null)
+    networkApi?.progressApi = null
     networkApi = null
+    progressApi = null
   }
 
   override fun onAttachedToActivity(binding: ActivityPluginBinding) {
@@ -41,6 +50,12 @@ class NetworkApiPlugin : FlutterPlugin, ActivityAware {
 
 private class NetworkApiImpl(private val context: Context) : NetworkApi {
   var activity: Activity? = null
+
+  private val uploader by lazy {
+    HttpClientManager.cronetEngine?.let {
+      StreamingFileUploader(it, HttpClientManager.cronetExecutor)
+    }
+  }
 
   override fun getAppGroupId(): String = context.packageName
 
@@ -96,4 +111,68 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
   override fun clearCookies() {
     HttpClientManager.clearCookies()
   }
+
+  override fun cancelStreamingUpload(progressKey: String) {
+    uploader?.cancel(progressKey)
+  }
+
+  override fun uploadFileStreaming(
+    url: String,
+    filePath: String,
+    fileName: String,
+    fileFieldName: String,
+    mimeType: String?,
+    fields: Map<String, String>,
+    progressKey: String,
+    callback: (Result<StreamingUploadResult>) -> Unit,
+  ) {
+    val uploader = this.uploader
+    if (uploader == null) {
+      callback(Result.success(StreamingUploadResult(false, 0, null, "Cronet engine unavailable")))
+      return
+    }
+
+    // Run off the main thread: the upload blocks on a latch until Cronet is done.
+    Thread {
+      val outcome = try {
+        uploader.upload(
+          url = url,
+          file = java.io.File(filePath),
+          fileName = fileName,
+          fileFieldName = fileFieldName,
+          mimeType = mimeType,
+          fields = fields,
+          progressKey = progressKey,
+          onProgress = { sent, total ->
+            // Cronet invokes this on its own thread. Pigeon channels must be used
+            // from the platform thread, so hop back before notifying Dart.
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+              progressApi?.onProgress(progressKey, sent, total) {}
+            }
+          },
+        )
+      } catch (e: Exception) {
+        StreamingFileUploader.Outcome(false, 0, null, e.toString())
+      }
+      // Pigeon replies must go out on the platform thread; this runs on the
+      // upload thread.
+      android.os.Handler(android.os.Looper.getMainLooper()).post {
+        callback(
+          Result.success(
+            StreamingUploadResult(
+              outcome.isSuccess,
+              // Pigeon maps Dart int to Kotlin Long.
+              outcome.statusCode.toLong(),
+              outcome.body,
+              outcome.errorMessage,
+            ),
+          ),
+        )
+      }
+    }.start()
+  }
+
+  /// Set by [NetworkApiPlugin] once the engine is attached so progress can be
+  /// pushed back to Dart.
+  var progressApi: StreamingUploadProgressApi? = null
 }

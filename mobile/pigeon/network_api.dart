@@ -16,6 +16,24 @@ class ClientCertPrompt {
   ClientCertPrompt(this.title, this.message, this.cancel, this.confirm);
 }
 
+/// Result of a streaming upload performed natively.
+class StreamingUploadResult {
+  bool isSuccess;
+  int statusCode;
+  String? body;
+  String? errorMessage;
+
+  StreamingUploadResult(this.isSuccess, this.statusCode, this.body, this.errorMessage);
+}
+
+/// Reports upload progress from the native streaming upload back to Dart.
+@FlutterApi()
+abstract class StreamingUploadProgressApi {
+  /// [progressKey] identifies which upload this belongs to, so concurrent
+  /// uploads do not overwrite each other's progress.
+  void onProgress(String progressKey, int transferred, int total);
+}
+
 @ConfigurePigeon(
   PigeonOptions(
     dartOut: 'lib/platform/network_api.g.dart',
@@ -54,4 +72,29 @@ abstract class NetworkApi {
   String getCronetUserAgent();
 
   String getCronetStoragePath();
+
+  /// Uploads a single file as `multipart/form-data` from native code, streaming
+  /// it off disk rather than buffering the whole payload in memory.
+  ///
+  /// `package:cronet_http` calls `stream.toBytes()` before handing the body to
+  /// Cronet, so any payload larger than the heap kills the process. This entry
+  /// point exists only to bypass that buffering; small uploads stay on the
+  /// regular Dart client.
+  ///
+  /// Returns the raw response body on 2xx, and a result describing the failure
+  /// otherwise. Progress is reported through [StreamingUploadProgressApi].
+  @async
+  StreamingUploadResult uploadFileStreaming(
+    String url,
+    String filePath,
+    String fileName,
+    String fileFieldName,
+    String? mimeType,
+    Map<String, String> fields,
+    String progressKey,
+  );
+
+  /// Asks the native side to abort an in-flight streaming upload. Safe to call
+  /// for a key that is not uploading.
+  void cancelStreamingUpload(String progressKey);
 }
