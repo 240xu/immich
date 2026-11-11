@@ -72,6 +72,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   bool _isCleanedUp = false;
 
+  /// Upper bound on the remote sync that primes a background backup. Without it
+  /// a stalled request leaves the worker RUNNING indefinitely with no log line
+  /// and no upload.
+  static const remoteSyncTimeout = Duration(minutes: 2);
+
   BackgroundWorkerBgService({
     required this._dataController,
     required ApiService apiService,
@@ -326,7 +331,19 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       return false;
     }
 
-    final isSuccess = await _remoteSyncService.sync();
+    // A remote sync that never returns wedges the whole background run: no
+    // backup starts, no "finished" line is logged, and the worker sits RUNNING
+    // until the OS kills it. The foreground path makes the same call but the
+    // user is watching the UI; here nothing would ever notice.
+    final isSuccess = await _remoteSyncService.sync().timeout(
+      remoteSyncTimeout,
+      onTimeout: () {
+        _logger.warning("Remote sync timed out after ${remoteSyncTimeout.inSeconds}s, skipping backup");
+        // Treat the timeout as a failed sync so the caller skips the backup
+        // instead of uploading against an unknown remote state.
+        return false;
+      },
+    );
     if (_isCleanedUp) {
       return isSuccess;
     }
