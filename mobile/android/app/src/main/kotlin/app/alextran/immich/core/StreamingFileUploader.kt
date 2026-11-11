@@ -1,5 +1,6 @@
 package app.alextran.immich.core
 
+import android.util.Log
 import org.chromium.net.CronetEngine
 import org.chromium.net.CronetException
 import org.chromium.net.UploadDataProvider
@@ -12,6 +13,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Streams a single `multipart/form-data` upload straight from disk through Cronet.
@@ -79,10 +81,16 @@ internal class StreamingFileUploader(
     val fileLength = file.length()
 
     val provider = FileUploadProvider(file, header, footer, fileLength, onProgress)
+    Log.i(TAG, "upload start file=${file.name} size=$fileLength " +
+      "header=${header.size} footer=${footer.size} " +
+      "totalLength=${provider.getLength()} url=$url")
 
     val latch = java.util.concurrent.CountDownLatch(1)
     var outcome: Outcome? = null
     var request: UrlRequest? = null
+
+    /** Bytes handed to Cronet so far, read by the callbacks for diagnostics. */
+    val uploadedBytes: Long get() = provider.bytesSentSnapshot
 
     val callback = object : UrlRequest.Callback() {
       override fun onRedirectReceived(request: UrlRequest, info: UrlResponseInfo, newLocationUrl: String) {
@@ -91,6 +99,8 @@ internal class StreamingFileUploader(
       }
 
       override fun onResponseStarted(request: UrlRequest, info: UrlResponseInfo) {
+        Log.i(TAG, "onResponseStarted status=${info.httpStatusCode} " +
+          "negProtocol=${info.negotiatedProtocol} headers=${info.allHeaders}")
         request.read(ByteBuffer.allocateDirect(BUFFER_SIZE))
       }
 
@@ -110,6 +120,10 @@ internal class StreamingFileUploader(
       }
 
       override fun onSucceeded(request: UrlRequest, info: UrlResponseInfo) {
+        Log.i(TAG, "onSucceeded status=${info.httpStatusCode} " +
+          "sent=$uploadedBytes total=${provider.getLength()} " +
+          "reads=${provider.readCount} lastRead=${provider.lastReadSize} " +
+          "bodyLen=${responseBytes.size()}")
         outcome = Outcome(
           isSuccess = info.httpStatusCode in 200..299,
           statusCode = info.httpStatusCode,
@@ -120,11 +134,19 @@ internal class StreamingFileUploader(
       }
 
       override fun onFailed(request: UrlRequest, info: UrlResponseInfo?, error: CronetException) {
+        Log.e(TAG, "onFailed status=${info?.httpStatusCode} " +
+          "sent=$uploadedBytes total=${provider.getLength()} " +
+          "reads=${provider.readCount} lastRead=${provider.lastReadSize} " +
+          "error=${error.message} isCronetError=${error.isCronetError} " +
+          "cronetError=${error.cronetError} " +
+          "cause=${error.cause?.javaClass?.simpleName}:${error.cause?.message}")
         outcome = Outcome(false, info?.httpStatusCode ?: 0, null, error.toString())
         latch.countDown()
       }
 
       override fun onCanceled(request: UrlRequest, info: UrlResponseInfo?) {
+        Log.w(TAG, "onCanceled status=${info?.httpStatusCode} sent=$uploadedBytes " +
+          "total=${provider.getLength()} reads=${provider.readCount}")
         outcome = Outcome(false, info?.httpStatusCode ?: 0, null, "Upload cancelled")
         latch.countDown()
       }
@@ -157,14 +179,38 @@ internal class StreamingFileUploader(
       activeRequests[progressKey] = request!!
       request.start()
 
+      // A watchdog is the only way to tell "Cronet stopped asking for data" from
+      // "the body is still draining". If readCount stops advancing while the
+      // request is live, the bug is on our side of the UploadDataProvider.
+      val watchdogStart = System.nanoTime()
+      val watchdog = java.util.Timer("upload-watchdog-$progressKey", true)
+      watchdog.scheduleAtFixedRate(object : java.util.TimerTask() {
+        override fun run() {
+          val elapsed = (System.nanoTime() - watchdogStart) / 1_000_000_000
+          Log.i(TAG, "watchdog t=${elapsed}s sent=$uploadedBytes/${provider.getLength()} " +
+            "reads=${provider.readCount} lastRead=${provider.lastReadSize} " +
+            "latchDone=${latch.count == 0L}")
+        }
+      }, 2000L, 3000L)
+
       // A missing callback would otherwise wedge the calling thread forever.
       val finished = latch.await(UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+      watchdog.cancel()
       if (!finished) {
+        Log.e(TAG, "upload timed out after ${UPLOAD_TIMEOUT_SECONDS}s " +
+          "sent=$uploadedBytes/${provider.getLength()} reads=${provider.readCount}")
         request.cancel()
         return Outcome(false, 0, null, "Upload timed out")
       }
+      outcome?.let {
+        val bodySnippet = it.body?.take(300)?.replace("\n", " ")
+        Log.i(TAG, "upload done success=${it.isSuccess} status=${it.statusCode} " +
+          "sent=$uploadedBytes/${provider.getLength()} reads=${provider.readCount} " +
+          "err=${it.errorMessage} body=$bodySnippet")
+      }
       outcome ?: Outcome(false, 0, null, "Upload finished with no result")
     } catch (e: Exception) {
+      Log.e(TAG, "upload threw sent=$uploadedBytes", e)
       Outcome(false, 0, null, e.toString())
     } finally {
       activeRequests.remove(progressKey)
@@ -221,6 +267,14 @@ internal class StreamingFileUploader(
     private var lastReported = 0L
     private var scratch = ByteArray(0)
 
+    /** Diagnostics: how many times Cronet asked for data, and the size of the last read. */
+    internal var readCount = 0L
+      private set
+    internal var lastReadSize = 0
+
+    /** Monotonic count of bytes handed to Cronet, safe to read from any thread. */
+    internal val bytesSentSnapshot: Long get() = bytesSent
+
     override fun getLength(): Long = totalLength
 
     override fun rewind(uploadDataSink: UploadDataSink) {
@@ -245,6 +299,7 @@ internal class StreamingFileUploader(
 
 
     override fun read(sink: UploadDataSink, buffer: ByteBuffer) {
+      readCount++
       try {
         var wrote = 0
         val capacity = buffer.remaining()
@@ -270,6 +325,7 @@ internal class StreamingFileUploader(
           if (read <= 0) {
             // Disk truncated underneath us; fail loudly rather than sending a
             // short body that the server would reject with a confusing error.
+            Log.e(TAG, "read#$readCount EOF at sent=$bytesSent fileRemaining=$fileRemaining want=$want")
             sink.onReadError(IOException("Unexpected EOF reading ${file.path}"))
             return
           }
@@ -287,9 +343,20 @@ internal class StreamingFileUploader(
           wrote += chunk
         }
 
+        lastReadSize = wrote
+
+        // Log the shape of the read loop: Cronet's buffer sizes tell us whether
+        // it is throttling us, and where the first non-full read lands.
+        if (readCount <= 8 || readCount % 200 == 0L || wrote == 0) {
+          Log.i(TAG, "read#$readCount cap=$capacity wrote=$wrote " +
+            "sent=$bytesSent/$totalLength fileRemaining=$fileRemaining " +
+            "headerRemaining=$headerRemaining footerRemaining=$footerRemaining")
+        }
+
         if (wrote == 0) {
           // No bytes left to hand over. Cronet needs the final-chunk flag set so
           // it can close out the request instead of asking again.
+          Log.i(TAG, "read#$readCount final chunk, sent=$bytesSent/$totalLength")
           sink.onReadSucceeded(true)
           return
         }
@@ -298,8 +365,10 @@ internal class StreamingFileUploader(
         onProgress?.let { report(it) }
         sink.onReadSucceeded(false)
       } catch (e: IOException) {
+        Log.e(TAG, "read#$readCount IOException sent=$bytesSent", e)
         sink.onReadError(e)
       } catch (e: Exception) {
+        Log.e(TAG, "read#$readCount failed sent=$bytesSent", e)
         sink.onReadError(IOException(e))
       }
     }
@@ -331,6 +400,7 @@ internal class StreamingFileUploader(
   }
 
   companion object {
+    private const val TAG = "ImmichStreamUpload"
     private const val BUFFER_SIZE = 256 * 1024
     private const val UPLOAD_TIMEOUT_SECONDS = 60L * 30
   }
