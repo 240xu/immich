@@ -91,7 +91,6 @@ internal class StreamingFileUploader(
 
     // Bytes handed to Cronet so far, read by the callbacks for diagnostics.
     val uploadedBytes: () -> Long = { provider.bytesSentSnapshot }
-
     val callback = object : UrlRequest.Callback() {
       override fun onRedirectReceived(request: UrlRequest, info: UrlResponseInfo, newLocationUrl: String) {
         // Follow redirects: Cronet does not do this for us by default.
@@ -121,7 +120,7 @@ internal class StreamingFileUploader(
 
       override fun onSucceeded(request: UrlRequest, info: UrlResponseInfo) {
         Log.i(TAG, "onSucceeded status=${info.httpStatusCode} " +
-          "sent=$uploadedBytes() total=${provider.getLength()} " +
+          "sent=${uploadedBytes()} total=${provider.getLength()} " +
           "reads=${provider.readCount} lastRead=${provider.lastReadSize} " +
           "bodyLen=${responseBytes.size()}")
         outcome = Outcome(
@@ -150,7 +149,7 @@ internal class StreamingFileUploader(
       }
 
       override fun onCanceled(request: UrlRequest, info: UrlResponseInfo?) {
-        Log.w(TAG, "onCanceled status=${info?.httpStatusCode} sent=$uploadedBytes() " +
+        Log.w(TAG, "onCanceled status=${info?.httpStatusCode} sent=${uploadedBytes()} " +
           "total=${provider.getLength()} reads=${provider.readCount}")
         outcome = Outcome(false, info?.httpStatusCode ?: 0, null, "Upload cancelled")
         latch.countDown()
@@ -192,7 +191,7 @@ internal class StreamingFileUploader(
       watchdog.scheduleAtFixedRate(object : java.util.TimerTask() {
         override fun run() {
           val elapsed = (System.nanoTime() - watchdogStart) / 1_000_000_000
-          Log.i(TAG, "watchdog t=${elapsed}s sent=$uploadedBytes()/${provider.getLength()} " +
+          Log.i(TAG, "watchdog t=${elapsed}s sent=${uploadedBytes()}/${provider.getLength()} " +
             "reads=${provider.readCount} lastRead=${provider.lastReadSize} " +
             "latchDone=${latch.count == 0L}")
         }
@@ -203,19 +202,19 @@ internal class StreamingFileUploader(
       watchdog.cancel()
       if (!finished) {
         Log.e(TAG, "upload timed out after ${UPLOAD_TIMEOUT_SECONDS}s " +
-          "sent=$uploadedBytes()/${provider.getLength()} reads=${provider.readCount}")
+          "sent=${uploadedBytes()}/${provider.getLength()} reads=${provider.readCount}")
         request.cancel()
         return Outcome(false, 0, null, "Upload timed out")
       }
       outcome?.let {
         val bodySnippet = it.body?.take(300)?.replace("\n", " ")
         Log.i(TAG, "upload done success=${it.isSuccess} status=${it.statusCode} " +
-          "sent=$uploadedBytes()/${provider.getLength()} reads=${provider.readCount} " +
+          "sent=${uploadedBytes()}/${provider.getLength()} reads=${provider.readCount} " +
           "err=${it.errorMessage} body=$bodySnippet")
       }
       outcome ?: Outcome(false, 0, null, "Upload finished with no result")
     } catch (e: Exception) {
-      Log.e(TAG, "upload threw sent=$uploadedBytes()", e)
+      Log.e(TAG, "upload threw sent=${uploadedBytes()}", e)
       Outcome(false, 0, null, e.toString())
     } finally {
       activeRequests.remove(progressKey)
