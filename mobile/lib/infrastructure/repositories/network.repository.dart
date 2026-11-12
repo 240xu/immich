@@ -133,14 +133,18 @@ class _CronetAuthClient extends http.BaseClient {
         switch (key) {
           case 'path':
             if (rawValue.startsWith('/')) path = rawValue;
+            break;
           case 'secure':
             secure = true;
+            break;
           case 'max-age':
             final seconds = int.tryParse(rawValue);
             if (seconds != null) expiresAt = DateTime.now().add(Duration(seconds: seconds));
+            break;
           case 'expires':
             final parsed = _tryParseHttpDate(rawValue);
             if (parsed != null) expiresAt = parsed;
+            break;
         }
       }
 
