@@ -121,7 +121,10 @@ class AuthService {
       _authRepository.clearLocalData(),
       Store.delete(StoreKey.currentUser),
       Store.delete(StoreKey.accessToken),
-      networkApi.clearCookies(),
+      // Clears the native jar *and* the in-process Cronet cookie jar. Calling
+      // networkApi.clearCookies() directly left the latter populated, so the old
+      // access token was re-sent after logout.
+      NetworkRepository.clearCookies(),
       SettingsRepository.instance.clear(const [
         .networkAutoEndpointSwitching,
         .networkPreferredWifiName,
