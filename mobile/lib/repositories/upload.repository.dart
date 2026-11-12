@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:background_downloader/background_downloader.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -49,9 +50,10 @@ class UploadRepository {
 
   /// Uploads through the native Cronet uploader, which streams the file off disk.
   ///
-  /// Returns null when the native path is not usable on this build so the caller
-  /// can fall back to the Dart client.
-  Future<UploadResult?> _uploadFileStreaming({
+  /// Always returns a result: a broken transfer comes back as
+  /// [UploadResult.error], never as a silent null that would send the caller
+  /// back to the memory-hungry Dart path.
+  Future<UploadResult> _uploadFileStreaming({
     required File file,
     required String originalFileName,
     required Map<String, String> fields,
@@ -59,14 +61,22 @@ class UploadRepository {
     required String logContext,
     Completer<void>? cancelToken,
   }) async {
-    final progressKey = '$logContext:${file.path}';
+    // The native request table lives in the process-wide Kotlin object, so the
+    // key must be unique per attempt -- not just per asset. Without the counter,
+    // the foreground and background isolates uploading the same asset would
+    // fight over one entry: the second overwrites the first, and cancelling
+    // either aborts the wrong request.
+    final progressKey = '$logContext:${file.path}#$_uploadKeySalt-${_streamingUploadSeq++}';
     if (onProgress != null) {
       _streamingProgressListeners[progressKey] = onProgress;
     }
 
     // Abort the native upload when the caller cancels, otherwise the native
     // thread keeps streaming long after the backup has been stopped.
-    if (cancelToken != null && !cancelToken.isCompleted) {
+    // Register even for an already-completed token: Completer.future.then fires
+    // immediately in that case, which is exactly the "cancelled while queued"
+    // window we most need to cover.
+    if (cancelToken != null) {
       unawaited(
         cancelToken.future.then((_) => _networkApi.cancelStreamingUpload(progressKey)).catchError((_) {}),
       );
@@ -98,15 +108,26 @@ class UploadRepository {
         }
       }
 
+      // A cancelled native request surfaces as a failure outcome. Mirror the Dart
+      // client's behaviour so the caller can tell "stopped" from "broke".
+      if (cancelToken?.isCompleted == true) {
+        return UploadResult.cancelled();
+      }
+
       final message = result.errorMessage ??
           (result.body?.isNotEmpty == true ? result.body : 'Upload failed with status ${result.statusCode}');
       logger.warning("Streaming upload $logContext failed: $message");
       return UploadResult.error(statusCode: result.statusCode, errorMessage: message);
     } catch (error, stackTrace) {
       logger.warning("Streaming upload $logContext threw", error, stackTrace);
-      // Returning null lets the caller retry with the Dart client, which is slow
-      // for big files but still better than dropping the asset.
-      return null;
+      if (cancelToken?.isCompleted == true) {
+        return UploadResult.cancelled();
+      }
+      // Do NOT fall back to the Dart client here. The native path only falls back
+      // when the engine is missing (the provider returns null); an exception means
+      // the transfer broke, and retrying through package:cronet_http would buffer
+      // the whole file in memory -- the exact OOM this path exists to avoid.
+      return UploadResult.error(errorMessage: 'Native streaming upload failed: $error');
     } finally {
       _streamingProgressListeners.remove(progressKey);
     }
@@ -115,6 +136,13 @@ class UploadRepository {
   /// Progress callbacks are routed by [progressKey] so concurrent uploads do not
   /// overwrite each other's progress.
   static final Map<String, void Function(int, int)> _streamingProgressListeners = {};
+
+  /// Salt per isolate. The native request table is process-wide while this
+  /// counter is not, so a bare sequence number would collide again once the
+  /// background isolate starts from zero; the salt keeps keys unique across both.
+  static final String _uploadKeySalt =
+      math.Random().nextInt(1 << 32).toRadixString(36);
+  static int _streamingUploadSeq = 0;
 
   static void dispatchStreamingProgress(String key, int transferred, int total) {
     _streamingProgressListeners[key]?.call(transferred, total);
@@ -168,7 +196,10 @@ class UploadRepository {
     // which makes anything larger than the heap unuploadable. Hand big files to
     // the native Cronet uploader, which streams them off disk instead.
     if (CurrentPlatform.isAndroid && file.lengthSync() > kStreamingUploadThreshold) {
-      final streamed = await _uploadFileStreaming(
+      // No fallback to the Dart client on failure: it buffers the whole body in
+      // memory, so retrying a >16 MB file that way is exactly the OOM this path
+      // exists to prevent. Report the failure instead.
+      return _uploadFileStreaming(
         file: file,
         originalFileName: originalFileName,
         fields: fields,
@@ -176,11 +207,6 @@ class UploadRepository {
         logContext: logContext,
         cancelToken: cancelToken,
       );
-      if (streamed != null) {
-        return streamed;
-      }
-      // Fall through to the regular client if the native path is unavailable,
-      // so a missing engine degrades to a slow upload rather than a hard failure.
     }
 
     final String savedEndpoint = Store.get(StoreKey.serverEndpoint);

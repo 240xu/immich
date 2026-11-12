@@ -185,6 +185,12 @@ class BackupNotifier extends StateNotifier<BackupState> {
       if (identical(_activeBackupRun, runGuard.future)) {
         _activeBackupRun = null;
         _activeBackupUserId = null;
+        // Drop the token too. Leaving a completed Completer here makes the next
+        // startForegroundBackup() take the "restarting the backup" branch and
+        // log a cancellation that never happened, which hides real ones.
+        if (identical(_cancelToken, cancelToken)) {
+          _cancelToken = null;
+        }
       }
       if (!runGuard.isCompleted) {
         runGuard.complete();

@@ -8,6 +8,7 @@ import app.alextran.immich.NativeBuffer
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import org.chromium.net.CronetEngine
 
 class NetworkApiPlugin : FlutterPlugin, ActivityAware {
   private var networkApi: NetworkApiImpl? = null
@@ -51,9 +52,32 @@ class NetworkApiPlugin : FlutterPlugin, ActivityAware {
 private class NetworkApiImpl(private val context: Context) : NetworkApi {
   var activity: Activity? = null
 
-  private val uploader by lazy {
-    HttpClientManager.cronetEngine?.let {
-      StreamingFileUploader(it, HttpClientManager.cronetExecutor)
+  // Cached per engine instance. HttpClientManager.rebuildCronetEngine() shuts
+  // the old engine down when the user clears the cache, and a uploader bound to
+  // that dead engine would fail every later upload with "Engine is shut down"
+  // for the rest of the process lifetime.
+  @Volatile private var uploaderEngine: CronetEngine? = null
+  @Volatile private var uploaderRef: StreamingFileUploader? = null
+
+  /** Reused for every progress tick instead of allocating a Handler per MB. */
+  private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+  private fun currentUploader(): StreamingFileUploader? {
+    val engine = HttpClientManager.cronetEngine ?: return null
+    val cached = uploaderRef
+    if (cached != null && uploaderEngine === engine) {
+      return cached
+    }
+    synchronized(this) {
+      val live = HttpClientManager.cronetEngine ?: return null
+      val existing = uploaderRef
+      if (existing != null && uploaderEngine === live) {
+        return existing
+      }
+      return StreamingFileUploader(live, HttpClientManager.cronetExecutor).also {
+        uploaderEngine = live
+        uploaderRef = it
+      }
     }
   }
 
@@ -113,7 +137,7 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
   }
 
   override fun cancelStreamingUpload(progressKey: String) {
-    uploader?.cancel(progressKey)
+    uploaderRef?.cancel(progressKey)
   }
 
   override fun uploadFileStreaming(
@@ -126,7 +150,7 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
     progressKey: String,
     callback: (Result<StreamingUploadResult>) -> Unit,
   ) {
-    val uploader = this.uploader
+    val uploader = currentUploader()
     if (uploader == null) {
       callback(Result.success(StreamingUploadResult(false, 0, null, "Cronet engine unavailable")))
       return
@@ -146,17 +170,20 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
           onProgress = { sent, total ->
             // Cronet invokes this on its own thread. Pigeon channels must be used
             // from the platform thread, so hop back before notifying Dart.
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
+            mainHandler.post {
               progressApi?.onProgress(progressKey, sent, total) {}
             }
           },
         )
-      } catch (e: Exception) {
-        StreamingFileUploader.Outcome(false, 0, null, e.toString())
+      } catch (t: Throwable) {
+        // Catch Throwable, not Exception: an Error (e.g. OOM while sizing a
+        // buffer) would otherwise kill this thread before the callback fires,
+        // leaving the Dart Future pending forever.
+        StreamingFileUploader.Outcome(false, 0, null, t.toString())
       }
       // Pigeon replies must go out on the platform thread; this runs on the
       // upload thread.
-      android.os.Handler(android.os.Looper.getMainLooper()).post {
+      mainHandler.post {
         callback(
           Result.success(
             StreamingUploadResult(
