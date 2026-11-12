@@ -56,8 +56,14 @@ class SyncStreamService {
 
   bool get isCancelled => _cancellation?.isCompleted ?? false;
 
-  Future<bool> sync() async {
+  Future<bool> sync({Future<void>? abortSignal}) async {
     _logger.info("Remote sync request for user");
+    // Callers that impose their own deadline pass a signal so a timeout actually
+    // stops the HTTP stream. Future.timeout() alone only abandons the outer
+    // Future: the stream would keep acking batches and writing to the database
+    // after the caller has moved on (and, in the background worker, after the
+    // database has been closed).
+    final signal = abortSignal ?? _cancellation?.future;
     final serverVersion = await _api.serverInfoApi.getServerVersion();
     if (serverVersion == null) {
       _logger.severe("Cannot perform sync: unable to determine server version");
@@ -82,14 +88,14 @@ class SyncStreamService {
       _handleEvents,
       serverVersion: serverSemVer,
       onReset: () => shouldReset = true,
-      abortSignal: _cancellation?.future,
+      abortSignal: signal,
     );
     if (shouldReset) {
       _logger.info("Resetting sync state as requested by server");
       await _syncApiRepository.streamChanges(
         _handleEvents,
         serverVersion: serverSemVer,
-        abortSignal: _cancellation?.future,
+        abortSignal: signal,
       );
     }
 

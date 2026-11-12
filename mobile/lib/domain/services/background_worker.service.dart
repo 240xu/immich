@@ -335,17 +335,31 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     // backup starts, no "finished" line is logged, and the worker sits RUNNING
     // until the OS kills it. The foreground path makes the same call but the
     // user is watching the UI; here nothing would ever notice.
-    final isSuccess = await _remoteSyncService.sync().timeout(
+    //
+    // The timeout needs its own abort signal: Future.timeout() only completes the
+    // outer Future, so without this the abandoned sync keeps acking batches and
+    // writing to the database -- including after _cleanup() has closed it.
+    final syncAbort = Completer<void>();
+    final isSuccess = await _remoteSyncService.sync(abortSignal: syncAbort.future).timeout(
       remoteSyncTimeout,
       onTimeout: () {
-        _logger.warning("Remote sync timed out after ${remoteSyncTimeout.inSeconds}s, skipping backup");
+        _logger.warning("Remote sync timed out after ${remoteSyncTimeout.inSeconds}s, aborting");
         // Treat the timeout as a failed sync so the caller skips the backup
         // instead of uploading against an unknown remote state.
+        if (!syncAbort.isCompleted) {
+          syncAbort.complete();
+        }
         return false;
       },
     );
     if (_isCleanedUp) {
       return isSuccess;
+    }
+
+    // Hashing a batch we are not going to upload burns minutes of CPU/battery for
+    // nothing; the caller retries the whole run anyway.
+    if (!isSuccess) {
+      return false;
     }
 
     var hashFuture = _hashService.hashAssets();

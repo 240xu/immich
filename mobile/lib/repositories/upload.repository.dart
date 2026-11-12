@@ -109,8 +109,10 @@ class UploadRepository {
       }
 
       // A cancelled native request surfaces as a failure outcome. Mirror the Dart
-      // client's behaviour so the caller can tell "stopped" from "broke".
-      if (cancelToken?.isCompleted == true) {
+      // client's behaviour so the caller can tell "stopped" from "broke". The
+      // message check also covers a cancel Cronet initiated itself, where the
+      // caller's token is still pending.
+      if (cancelToken?.isCompleted == true || result.errorMessage == 'Upload cancelled') {
         return UploadResult.cancelled();
       }
 
@@ -191,6 +193,13 @@ class UploadRepository {
     required String logContext,
     Client? httpClient,
   }) async {
+    // A worker can be cancelled while it sits in the queue between picking an
+    // asset and reaching this call. Starting the transfer anyway would push the
+    // whole file to the server with nothing left to abort it.
+    if (cancelToken?.isCompleted == true) {
+      return UploadResult.cancelled();
+    }
+
     // package:cronet_http buffers the entire request body in memory before it
     // hands it to the native layer (cronet_client.dart: `await stream.toBytes()`),
     // which makes anything larger than the heap unuploadable. Hand big files to

@@ -76,6 +76,10 @@ class BackupNotifier extends StateNotifier<BackupState> {
   final UploadSpeedManager _uploadSpeedManager;
   Completer<void>? _cancelToken;
 
+  /// Bumped for every foreground run. Callbacks carry the value they were
+  /// created with, so anything from a stopped run is discarded on arrival.
+  int _backupGeneration = 0;
+
   // Which user the in-flight foreground backup belongs to, and a handle on that
   // run. Resume and splash can both ask for a backup of the same user at almost
   // the same time; without this the second call cancels the first run's token and
@@ -152,6 +156,12 @@ class BackupNotifier extends StateNotifier<BackupState> {
     final cancelToken = Completer<void>();
     _cancelToken = cancelToken;
 
+    // Identity for this run. Callbacks from a stopped run can arrive minutes
+    // later (an in-flight native upload only notices the cancel when Cronet
+    // reacts); without this they would be counted into the *next* run --
+    // decrementing its remainder and overwriting its progress.
+    final generation = ++_backupGeneration;
+
     // Claim the slot before the first await so a call arriving during the
     // backup-status recount still joins this run instead of cancelling it.
     final runGuard = Completer<void>();
@@ -173,10 +183,15 @@ class BackupNotifier extends StateNotifier<BackupState> {
         userId,
         cancelToken,
         callbacks: UploadCallbacks(
-          onProgress: _handleForegroundBackupProgress,
-          onSuccess: _handleForegroundBackupSuccess,
-          onError: _handleForegroundBackupError,
-          onICloudProgress: _handleICloudProgress,
+          onProgress: (id, name, bytes, total) =>
+              _handleForegroundBackupProgress(generation, id, name, bytes, total),
+          onSuccess: (id, remoteId) => _handleForegroundBackupSuccess(generation, id, remoteId),
+          onError: (id, message) => _handleForegroundBackupError(generation, id, message),
+          onICloudProgress: (id, progress) => _handleICloudProgress(generation, id, progress),
+          // Deliberately not generation-gated: stopForegroundBackup() bumps the
+          // generation before the uploader notices, and this callback is exactly
+          // the "that item is no longer uploading" signal for the stopped run.
+          onCancelled: (id) => _handleForegroundBackupCancelled(id),
         ),
       );
     } finally {
@@ -198,12 +213,30 @@ class BackupNotifier extends StateNotifier<BackupState> {
     }
   }
 
+  /// Cancel path. Deliberately does not insert an item: stopping the backup
+  /// already clears [uploadItems], and re-adding one here would resurrect a row
+  /// the user just dismissed. Only bookkeeping is cleaned up.
+  void _handleForegroundBackupCancelled(String localAssetId) {
+    if (!mounted) {
+      return;
+    }
+    _uploadSpeedManager.removeTask(localAssetId);
+    if (state.uploadItems.containsKey(localAssetId)) {
+      final remaining = Map<String, UploadStatus>.from(state.uploadItems)..remove(localAssetId);
+      state = state.copyWith(uploadItems: remaining);
+    }
+  }
+
   void stopForegroundBackup({required String reason}) {
     if (_cancelToken != null) {
       _logger.info("Foreground backup cancelled: $reason");
     }
     _cancelToken?.complete();
     _cancelToken = null;
+    // Invalidate this run's callbacks. Cancelling only asks the uploader to stop;
+    // an in-flight native transfer keeps reporting until Cronet reacts, and those
+    // late callbacks must not land in state after everything was cleared.
+    _backupGeneration++;
     // Drop the active-run slot too. The run is being cancelled, so a resume that
     // arrives before the old future unwinds must start a fresh run rather than
     // joining one that is already shutting down.
@@ -213,11 +246,18 @@ class BackupNotifier extends StateNotifier<BackupState> {
     state = state.copyWith(uploadItems: {}, iCloudDownloadProgress: {});
   }
 
-  void _handleICloudProgress(String localAssetId, double progress) {
+  void _handleICloudProgress(int generation, String localAssetId, double progress) {
+    if (!mounted || generation != _backupGeneration) {
+      // Disposed, or a leftover callback from a stopped run.
+      return;
+    }
     state = state.copyWith(iCloudDownloadProgress: {...state.iCloudDownloadProgress, localAssetId: progress});
 
     if (progress >= 1.0) {
       Future.delayed(const Duration(milliseconds: 250), () {
+        if (!mounted || generation != _backupGeneration) {
+          return;
+        }
         final updatedProgress = Map<String, double>.from(state.iCloudDownloadProgress);
         updatedProgress.remove(localAssetId);
         state = state.copyWith(iCloudDownloadProgress: updatedProgress);
@@ -225,8 +265,8 @@ class BackupNotifier extends StateNotifier<BackupState> {
     }
   }
 
-  void _handleForegroundBackupProgress(String localAssetId, String filename, int bytes, int totalBytes) {
-    if (_cancelToken == null) {
+  void _handleForegroundBackupProgress(int generation, String localAssetId, String filename, int bytes, int totalBytes) {
+    if (generation != _backupGeneration || _cancelToken == null) {
       return;
     }
 
@@ -261,9 +301,9 @@ class BackupNotifier extends StateNotifier<BackupState> {
     }
   }
 
-  void _handleForegroundBackupSuccess(String localAssetId, String remoteAssetId) {
-    if (!mounted) {
-      _logger.warning("Skip _handleForegroundBackupSuccess: notifier disposed");
+  void _handleForegroundBackupSuccess(int generation, String localAssetId, String remoteAssetId) {
+    if (!mounted || generation != _backupGeneration) {
+      _logger.warning("Skip _handleForegroundBackupSuccess: stale run or notifier disposed");
       return;
     }
     state = state.copyWith(backupCount: state.backupCount + 1, remainderCount: state.remainderCount - 1);
@@ -274,7 +314,12 @@ class BackupNotifier extends StateNotifier<BackupState> {
     });
   }
 
-  void _handleForegroundBackupError(String localAssetId, String errorMessage) {
+  void _handleForegroundBackupError(int generation, String localAssetId, String errorMessage) {
+    if (!mounted || generation != _backupGeneration) {
+      // Disposed, or a cancelled upload from a stopped run reporting its failure
+      // late -- which must not be added to the current run's list.
+      return;
+    }
     final currentItem = state.uploadItems[localAssetId];
     if (currentItem != null) {
       state = state.copyWith(

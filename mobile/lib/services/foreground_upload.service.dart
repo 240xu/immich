@@ -364,6 +364,14 @@ class ForegroundUploadService {
           logContext: 'livePhotoVideo[${asset.localId}]',
         );
 
+        if (livePhotoResult.isCancelled) {
+          // The pair is uploaded together; a cancelled video means the whole
+          // asset was cancelled, so uploading the still image here would create
+          // an orphan on the server.
+          callbacks.onCancelled?.call(asset.localId!);
+          return;
+        }
+
         if (livePhotoResult.isSuccess && livePhotoResult.remoteAssetId != null) {
           livePhotoVideoId = livePhotoResult.remoteAssetId;
         }
