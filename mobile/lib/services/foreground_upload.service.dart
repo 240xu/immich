@@ -368,6 +368,7 @@ class ForegroundUploadService {
           // The pair is uploaded together; a cancelled video means the whole
           // asset was cancelled, so uploading the still image here would create
           // an orphan on the server.
+          shouldAbortUpload = true;
           callbacks.onCancelled?.call(asset.localId!);
           return;
         }

@@ -142,8 +142,12 @@ class UploadRepository {
   /// Salt per isolate. The native request table is process-wide while this
   /// counter is not, so a bare sequence number would collide again once the
   /// background isolate starts from zero; the salt keeps keys unique across both.
+  ///
+  /// 0x7FFFFFFF rather than 1 << 32: this runs during class initialisation, so a
+  /// RangeError here would break every upload. nextInt() only guarantees a range
+  /// up to 2^32, and staying well inside it removes the boundary question.
   static final String _uploadKeySalt =
-      math.Random().nextInt(1 << 32).toRadixString(36);
+      math.Random().nextInt(0x7FFFFFFF).toRadixString(36);
   static int _streamingUploadSeq = 0;
 
   static void dispatchStreamingProgress(String key, int transferred, int total) {

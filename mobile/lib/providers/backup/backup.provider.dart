@@ -166,7 +166,12 @@ class BackupNotifier extends StateNotifier<BackupState> {
     // backup-status recount still joins this run instead of cancelling it.
     final runGuard = Completer<void>();
     _activeBackupUserId = userId;
+    // Joiners await this. Mark the error as observed up front: most runs have no
+    // joiner at all, and completeError() on an unlistened Future would surface as
+    // an unhandled async error. Joiners attach their own listener to the same
+    // future, so they still see the failure.
     _activeBackupRun = runGuard.future;
+    unawaited(runGuard.future.then<void>((_) {}, onError: (Object _, StackTrace __) {}));
 
     try {
       // TODO: Once the tmp cleanup is fixed, revert this and handle it differently.
