@@ -193,10 +193,10 @@ class BackupNotifier extends StateNotifier<BackupState> {
           onSuccess: (id, remoteId) => _handleForegroundBackupSuccess(generation, id, remoteId),
           onError: (id, message) => _handleForegroundBackupError(generation, id, message),
           onICloudProgress: (id, progress) => _handleICloudProgress(generation, id, progress),
-          // Deliberately not generation-gated: stopForegroundBackup() bumps the
-          // generation before the uploader notices, and this callback is exactly
-          // the "that item is no longer uploading" signal for the stopped run.
-          onCancelled: (id) => _handleForegroundBackupCancelled(id),
+          // Generation-gated like the rest: stopping the previous run already
+          // cleared uploadItems, so a late cancel from it must not delete the row
+          // the *current* run is actively uploading for the same asset.
+          onCancelled: (id) => _handleForegroundBackupCancelled(generation, id),
         ),
       );
     } catch (error, stackTrace) {
@@ -225,11 +225,12 @@ class BackupNotifier extends StateNotifier<BackupState> {
     }
   }
 
-  /// Cancel path. Deliberately does not insert an item: stopping the backup
-  /// already clears [uploadItems], and re-adding one here would resurrect a row
-  /// the user just dismissed. Only bookkeeping is cleaned up.
-  void _handleForegroundBackupCancelled(String localAssetId) {
-    if (!mounted) {
+  /// Cancel path for an upload that stopped inside the current run. Does not
+  /// insert an item: the row is either gone already (the run was stopped, which
+  /// clears uploadItems) or owned by a newer run, and re-adding it would
+  /// resurrect a row the user just dismissed.
+  void _handleForegroundBackupCancelled(int generation, String localAssetId) {
+    if (!mounted || generation != _backupGeneration) {
       return;
     }
     _uploadSpeedManager.removeTask(localAssetId);
@@ -278,7 +279,7 @@ class BackupNotifier extends StateNotifier<BackupState> {
   }
 
   void _handleForegroundBackupProgress(int generation, String localAssetId, String filename, int bytes, int totalBytes) {
-    if (generation != _backupGeneration || _cancelToken == null) {
+    if (!mounted || generation != _backupGeneration || _cancelToken == null) {
       return;
     }
 

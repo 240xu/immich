@@ -108,11 +108,11 @@ class UploadRepository {
         }
       }
 
-      // A cancelled native request surfaces as a failure outcome. Mirror the Dart
-      // client's behaviour so the caller can tell "stopped" from "broke". The
-      // message check also covers a cancel Cronet initiated itself, where the
-      // caller's token is still pending.
-      if (cancelToken?.isCompleted == true || result.errorMessage == 'Upload cancelled') {
+      // Only an abort we asked for is a cancellation. Cronet also cancels the
+      // request itself when the body stalls or the hard deadline hits, and that
+      // is a transport failure -- treating it as a cancel sets shouldAbortUpload
+      // and silently kills the rest of the batch.
+      if (cancelToken?.isCompleted == true) {
         return UploadResult.cancelled();
       }
 
@@ -143,9 +143,8 @@ class UploadRepository {
   /// counter is not, so a bare sequence number would collide again once the
   /// background isolate starts from zero; the salt keeps keys unique across both.
   ///
-  /// 0x7FFFFFFF rather than 1 << 32: this runs during class initialisation, so a
-  /// RangeError here would break every upload. nextInt() only guarantees a range
-  /// up to 2^32, and staying well inside it removes the boundary question.
+  /// 31 random bits leaves a 1-in-2^31 collision chance between the two
+  /// isolates, which is far below the probability of a duplicate key mattering.
   static final String _uploadKeySalt =
       math.Random().nextInt(0x7FFFFFFF).toRadixString(36);
   static int _streamingUploadSeq = 0;

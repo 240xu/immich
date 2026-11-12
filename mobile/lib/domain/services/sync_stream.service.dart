@@ -58,12 +58,16 @@ class SyncStreamService {
 
   Future<bool> sync({Future<void>? abortSignal}) async {
     _logger.info("Remote sync request for user");
-    // Callers that impose their own deadline pass a signal so a timeout actually
-    // stops the HTTP stream. Future.timeout() alone only abandons the outer
-    // Future: the stream would keep acking batches and writing to the database
-    // after the caller has moved on (and, in the background worker, after the
-    // database has been closed).
-    final signal = abortSignal ?? _cancellation?.future;
+    // Both signals must be honoured: a caller-supplied deadline *and* this
+    // isolate's cancellation token. Using `abortSignal ?? _cancellation` silently
+    // disabled the latter, so a cancelled worker kept its HTTP stream open until
+    // the next batch boundary -- or forever if the server went silent.
+    final cancellation = _cancellation;
+    final signals = <Future<void>>[
+      if (abortSignal != null) abortSignal,
+      if (cancellation != null) cancellation.future,
+    ];
+    final signal = signals.isEmpty ? null : (signals.length == 1 ? signals.single : Future.any(signals));
     final serverVersion = await _api.serverInfoApi.getServerVersion();
     if (serverVersion == null) {
       _logger.severe("Cannot perform sync: unable to determine server version");
@@ -105,6 +109,15 @@ class SyncStreamService {
     if (migrations.length != previousLength) {
       _logger.info("Updated pre-sync migration status: $migrations");
       await Store.put(StoreKey.syncMigrationStatus, jsonEncode(migrations));
+    }
+
+    // streamChanges returns normally when the abort signal fires, so without this
+    // an aborted sync would report success and the caller would go on to upload
+    // against a half-applied remote state. Only the isolate token is observable
+    // here; a caller's deadline is enforced by the caller itself.
+    if (isCancelled) {
+      _logger.warning("Remote sync aborted");
+      return false;
     }
 
     return true;

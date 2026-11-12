@@ -137,7 +137,10 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
   }
 
   override fun cancelStreamingUpload(progressKey: String) {
-    uploaderRef?.cancel(progressKey)
+    // The uploader is created lazily on the first upload. Dropping the cancel when
+    // it does not exist yet loses the "cancelled while queued" signal and the
+    // transfer then runs to completion.
+    (uploaderRef ?: currentUploader())?.cancel(progressKey)
   }
 
   override fun uploadFileStreaming(
