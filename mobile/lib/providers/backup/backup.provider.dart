@@ -194,6 +194,13 @@ class BackupNotifier extends StateNotifier<BackupState> {
           onCancelled: (id) => _handleForegroundBackupCancelled(id),
         ),
       );
+    } catch (error, stackTrace) {
+      // Propagate to joiners: they await runGuard.future, and completing it
+      // normally would tell them the run succeeded when it actually threw.
+      if (!runGuard.isCompleted) {
+        runGuard.completeError(error, stackTrace);
+      }
+      rethrow;
     } finally {
       // Release the slot only if it is still ours: a pause may have stopped this
       // run and a newer one may already own it.
