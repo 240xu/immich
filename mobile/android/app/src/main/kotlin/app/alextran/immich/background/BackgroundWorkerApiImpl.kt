@@ -20,6 +20,7 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
   private val ctx: Context = context.applicationContext
 
   override fun enable() {
+    BackgroundWorkerPreferences(ctx).setSyncEnabled(true)
     enqueueMediaObserver(ctx)
     enqueuePeriodicWorker(ctx)
   }
@@ -30,11 +31,19 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
 
   override fun configure(settings: BackgroundWorkerSettings) {
     BackgroundWorkerPreferences(ctx).updateSettings(settings)
+    // Only settings that affect scheduling need a reschedule. If the user has
+    // switched background sync off, changing an unrelated option (charging,
+    // delay) must not quietly bring the workers back.
+    if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+      Log.i(TAG, "Background sync disabled, not rescheduling after configure")
+      return
+    }
     enqueueMediaObserver(ctx)
     enqueuePeriodicWorker(ctx)
   }
 
   override fun disable() {
+    BackgroundWorkerPreferences(ctx).setSyncEnabled(false)
     WorkManager.getInstance(ctx).apply {
       cancelUniqueWork(OBSERVER_WORKER_NAME)
       cancelUniqueWork(BACKGROUND_WORKER_NAME)
@@ -108,6 +117,13 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     }
 
     fun enqueueBackgroundWorker(ctx: Context) {
+      // Reached from ImmichApp.onCreate's 15s timer and from runNow(). Honour the
+      // user's background-sync setting: without this the schedule comes back even
+      // while the switch is off.
+      if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+        Log.i(TAG, "Background sync disabled, skipping enqueue")
+        return
+      }
       val constraints = Constraints.Builder().setRequiresBatteryNotLow(true).build()
       val work = OneTimeWorkRequestBuilder<BackgroundWorker>()
         .setConstraints(constraints)
@@ -120,6 +136,12 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     }
 
     fun enqueueBackgroundWorkerWhenConnected(ctx: Context) {
+      // Retry scheduling must also respect the switch, otherwise a run that was
+      // cancelled when the user turned sync off re-queues itself.
+      if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+        Log.i(TAG, "Background sync disabled, skipping retry enqueue")
+        return
+      }
       val settings = BackgroundWorkerPreferences(ctx).getSettings()
       val constraints = Constraints.Builder().apply {
         setRequiredNetworkType(NetworkType.CONNECTED)

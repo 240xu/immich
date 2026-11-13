@@ -61,80 +61,101 @@ class UploadRepository {
     required String logContext,
     Completer<void>? cancelToken,
   }) async {
-    // The native request table lives in the process-wide Kotlin object, so the
-    // key must be unique per attempt -- not just per asset. Without the counter,
-    // the foreground and background isolates uploading the same asset would
-    // fight over one entry: the second overwrites the first, and cancelling
-    // either aborts the wrong request.
-    final progressKey = '$logContext:${file.path}#$_uploadKeySalt-${_streamingUploadSeq++}';
-    if (onProgress != null) {
-      _streamingProgressListeners[progressKey] = onProgress;
-    }
+    // Upstream resends once when the request dies before any response arrives
+    // (upload.repository.dart: `on ClientException ... resending once`). Match
+    // that, but only when not a single byte reached the server: a resend after a
+    // partial body could leave a half-written asset plus a duplicate.
+    for (var attempt = 0; ; attempt++) {
+      // The native request table lives in the process-wide Kotlin object, so the
+      // key must be unique per attempt -- not just per asset. Without the counter,
+      // the foreground and background isolates uploading the same asset would
+      // fight over one entry: the second overwrites the first, and cancelling
+      // either aborts the wrong request.
+      final progressKey = '$logContext:${file.path}#$_uploadKeySalt-${_streamingUploadSeq++}';
+      var bytesSent = 0;
+      if (onProgress != null) {
+        _streamingProgressListeners[progressKey] = (sent, total) {
+          bytesSent = sent;
+          onProgress(sent, total);
+        };
+      }
 
-    // Abort the native upload when the caller cancels, otherwise the native
-    // thread keeps streaming long after the backup has been stopped.
-    // Register even for an already-completed token: Completer.future.then fires
-    // immediately in that case, which is exactly the "cancelled while queued"
-    // window we most need to cover.
-    if (cancelToken != null) {
-      unawaited(
-        cancelToken.future.then((_) => _networkApi.cancelStreamingUpload(progressKey)).catchError((_) {}),
-      );
-    }
+      // Abort the native upload when the caller cancels, otherwise the native
+      // thread keeps streaming long after the backup has been stopped.
+      // Register even for an already-completed token: Completer.future.then fires
+      // immediately in that case, which is exactly the "cancelled while queued"
+      // window we most need to cover.
+      if (cancelToken != null) {
+        unawaited(
+          cancelToken.future.then((_) => _networkApi.cancelStreamingUpload(progressKey)).catchError((_) {}),
+        );
+      }
 
-    try {
-      final endpoint = Store.get(StoreKey.serverEndpoint);
-      final result = await _networkApi.uploadFileStreaming(
-        '$endpoint/assets',
-        file.path,
-        originalFileName,
-        'assetData',
-        _mimeTypeForFile(originalFileName),
-        fields,
-        progressKey,
-      );
+      try {
+        final endpoint = Store.get(StoreKey.serverEndpoint);
+        final result = await _networkApi.uploadFileStreaming(
+          '$endpoint/assets',
+          file.path,
+          originalFileName,
+          'assetData',
+          _mimeTypeForFile(originalFileName),
+          fields,
+          progressKey,
+        );
 
-      if (result.isSuccess) {
-        final body = result.body ?? '';
-        try {
-          final decoded = jsonDecode(body);
-          final id = decoded['id'];
-          if (id is String) {
-            return UploadResult.success(remoteAssetId: id);
+        if (result.isSuccess) {
+          final body = result.body ?? '';
+          try {
+            final decoded = jsonDecode(body);
+            final id = decoded['id'];
+            if (id is String) {
+              return UploadResult.success(remoteAssetId: id);
+            }
+            return UploadResult.error(errorMessage: 'Failed to parse server response');
+          } catch (_) {
+            return UploadResult.error(errorMessage: 'Failed to parse server response');
           }
-          return UploadResult.error(errorMessage: 'Failed to parse server response');
-        } catch (_) {
-          return UploadResult.error(errorMessage: 'Failed to parse server response');
         }
-      }
 
-      // Only an abort we asked for is a cancellation. Cronet also cancels the
-      // request itself when the body stalls or the hard deadline hits, and that
-      // is a transport failure -- treating it as a cancel sets shouldAbortUpload
-      // and silently kills the rest of the batch.
-      if (cancelToken?.isCompleted == true) {
-        return UploadResult.cancelled();
-      }
+        // Only an abort we asked for is a cancellation. Cronet also cancels the
+        // request itself when the body stalls or the hard deadline hits, and that
+        // is a transport failure -- treating it as a cancel sets shouldAbortUpload
+        // and silently kills the rest of the batch.
+        if (cancelToken?.isCompleted == true) {
+          return UploadResult.cancelled();
+        }
 
-      // Mirror the Dart path's error extraction so both routes report the same
-      // text. Callers match on the message ("Quota has been exceeded!" stops the
-      // whole batch), so handing them the raw JSON body would break that.
-      final body = result.body ?? '';
-      final message = _extractErrorMessage(statusCode: result.statusCode, body: body);
-      logger.warning("Streaming upload $logContext failed: $message");
-      return UploadResult.error(statusCode: result.statusCode, errorMessage: message);
-    } catch (error, stackTrace) {
-      logger.warning("Streaming upload $logContext threw", error, stackTrace);
-      if (cancelToken?.isCompleted == true) {
-        return UploadResult.cancelled();
+        // statusCode 0 means no HTTP response at all (connection died, engine
+        // gone). Only then, and only with nothing on the wire, is a resend safe.
+        if (result.statusCode == 0 && bytesSent == 0 && attempt == 0) {
+          logger.warning("Streaming upload $logContext failed before any data was sent, resending once");
+          continue;
+        }
+
+        // Mirror the Dart path's error extraction so both routes report the same
+        // text. Callers match on the message ("Quota has been exceeded!" stops the
+        // whole batch), so handing them the raw JSON body would break that.
+        final body = result.body ?? '';
+        final message = _extractErrorMessage(statusCode: result.statusCode, body: body);
+        logger.warning("Streaming upload $logContext failed: $message");
+        return UploadResult.error(statusCode: result.statusCode, errorMessage: message);
+      } catch (error, stackTrace) {
+        logger.warning("Streaming upload $logContext threw", error, stackTrace);
+        if (cancelToken?.isCompleted == true) {
+          return UploadResult.cancelled();
+        }
+        if (bytesSent == 0 && attempt == 0) {
+          logger.warning("Streaming upload $logContext threw before any data was sent, resending once");
+          continue;
+        }
+        // Do NOT fall back to the Dart client here. The native path only falls back
+        // when the engine is missing (the provider returns null); an exception means
+        // the transfer broke, and retrying through package:cronet_http would buffer
+        // the whole file in memory -- the exact OOM this path exists to avoid.
+        return UploadResult.error(errorMessage: 'Native streaming upload failed: $error');
+      } finally {
+        _streamingProgressListeners.remove(progressKey);
       }
-      // Do NOT fall back to the Dart client here. The native path only falls back
-      // when the engine is missing (the provider returns null); an exception means
-      // the transfer broke, and retrying through package:cronet_http would buffer
-      // the whole file in memory -- the exact OOM this path exists to avoid.
-      return UploadResult.error(errorMessage: 'Native streaming upload failed: $error');
-    } finally {
-      _streamingProgressListeners.remove(progressKey);
     }
   }
 
@@ -230,7 +251,13 @@ class UploadRepository {
     // hands it to the native layer (cronet_client.dart: `await stream.toBytes()`),
     // which makes anything larger than the heap unuploadable. Hand big files to
     // the native Cronet uploader, which streams them off disk instead.
-    if (CurrentPlatform.isAndroid && file.lengthSync() > kStreamingUploadThreshold) {
+    //
+    // mTLS users stay on the buffered path: the native uploader talks to Cronet
+    // directly, and Cronet cannot present a client certificate, so handshake
+    // would fail. Their client is OkHttp, which streams the body itself.
+    if (CurrentPlatform.isAndroid &&
+        !NetworkRepository.usingMtls &&
+        file.lengthSync() > kStreamingUploadThreshold) {
       // No fallback to the Dart client on failure: it buffers the whole body in
       // memory, so retrying a >16 MB file that way is exactly the OOM this path
       // exists to prevent. Report the failure instead.

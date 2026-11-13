@@ -28,14 +28,15 @@ class NetworkRepository {
     }
     _clientPointer = clientPointer;
     _usingMtls = mtls;
-    _client?.close();
     if (Platform.isIOS) {
+      _client?.close();
       final session = URLSession.fromRawPointer(clientPointer.cast());
       _client = CupertinoClient.fromSharedSession(session);
     } else if (mtls) {
       // Cronet cannot be given a client certificate (see HttpClientManager's image
       // loader, which falls back to OkHttp for the same reason), so mTLS users stay
       // on the native OkHttp client with its configured timeouts.
+      _client?.close();
       _client = OkHttpClient.fromJniGlobalRef(
         clientPointer,
         configuration: const OkHttpClientConfiguration(
@@ -45,7 +46,17 @@ class NetworkRepository {
         ),
       );
     } else {
-      _client = _CronetAuthClient(await _buildCronetClient());
+      // Keep the wrapper object identity stable when one already exists: callers
+      // hold a snapshot of it (ApiService._apiClient.client), so replacing the
+      // wrapper would leave them holding a closed client.
+      final engine = await _buildCronetClient();
+      final current = _client;
+      if (current is _CronetAuthClient) {
+        current.reset(engine);
+      } else {
+        _client?.close();
+        _client = _CronetAuthClient(engine);
+      }
     }
   }
 
@@ -81,20 +92,31 @@ class NetworkRepository {
   /// Clears the session cookies.
   ///
   /// The native persistent jar is cleared directly. The Cronet engine keeps its own
-  /// cookie store and exposes no API to clear it, so the client is dropped and
-  /// rebuilt on next use instead -- otherwise the old access token would keep being
-  /// attached to requests after the user signed out.
+  /// cookie store and exposes no API to clear it, so the engine is replaced --
+  /// in place, keeping this wrapper's identity intact, because callers hold a
+  /// snapshot of the client (`ApiService._apiClient.client`). Swapping the object
+  /// itself would leave them holding a closed one.
   static Future<void> clearCookies() async {
     await networkApi.clearCookies();
     if (Platform.isAndroid && !_usingMtls) {
-      // Drop the engine (its cookie store cannot be cleared through the API) and
-      // rebuild it immediately: callers read [client] right after logout, so
-      // leaving it null here would crash them.
-      final pointer = _clientPointer;
-      _client?.close();
-      _client = _CronetAuthClient(await _buildCronetClient());
-      _clientPointer = pointer;
+      final current = _client;
+      if (current is _CronetAuthClient) {
+        current.reset(await _buildCronetClient());
+      }
     }
+  }
+
+  /// Releases the client and the native engine behind it.
+  ///
+  /// Each isolate builds its own Cronet engine, and the engine holds native
+  /// threads and a 64 MiB cache until `shutdown()` runs. Isolates are torn down
+  /// regularly (every background worker run), so they must release it explicitly
+  /// rather than rely on the isolate dying.
+  static void dispose() {
+    _client?.close();
+    _client = null;
+    _clientPointer = null;
+    _usingMtls = false;
   }
 
   /// Returns a shared HTTP client that uses native SSL configuration.
@@ -104,6 +126,12 @@ class NetworkRepository {
   ///
   /// Must call [init] before using this method.
   static http.Client get client => _client!;
+
+  /// Whether the active client is the native OkHttp one because a client
+  /// certificate is installed. Callers that bypass [client] -- the native
+  /// streaming uploader talks to Cronet directly -- must consult this first,
+  /// because Cronet cannot present a client certificate.
+  static bool get usingMtls => _usingMtls;
 }
 
 /// Attaches the headers the native client would have attached.
@@ -116,7 +144,18 @@ class NetworkRepository {
 class _CronetAuthClient extends http.BaseClient {
   _CronetAuthClient(this._inner);
 
-  final http.Client _inner;
+  http.Client _inner;
+
+  /// Swaps the underlying client without changing this object's identity.
+  ///
+  /// The Cronet engine's cookie store cannot be cleared through the API, so a
+  /// logout has to replace the engine. Callers keep a reference to this wrapper
+  /// (e.g. `ApiService._apiClient.client`), so it must survive the swap.
+  void reset(http.Client inner) {
+    final previous = _inner;
+    _inner = inner;
+    previous.close();
+  }
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
@@ -124,12 +163,12 @@ class _CronetAuthClient extends http.BaseClient {
     // the cookie jar (parsed per RFC 6265, synced across server URLs) and any Basic
     // credentials embedded in the URL. Copy its answer onto the request instead of
     // reconstructing it here.
+    //
+    // Overwrite unconditionally, matching the OkHttp interceptor this replaces
+    // (HttpClientManager: `builder.header(key, value)`): user-configured headers
+    // must win over whatever the API client set by default.
     final headers = await networkApi.requestAuthHeaders(request.url.toString());
-    headers.forEach((k, v) {
-      if (!request.headers.containsKey(k)) {
-        request.headers[k] = v;
-      }
-    });
+    headers.forEach((k, v) => request.headers[k] = v);
 
     // Cronet follows redirects by replaying the same UrlRequest, so the Cookie and
     // Authorization headers set above would travel to the redirect target too --

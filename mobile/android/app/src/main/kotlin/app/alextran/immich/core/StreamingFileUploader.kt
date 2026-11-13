@@ -205,9 +205,14 @@ internal class StreamingFileUploader(
 
       // A missing callback would otherwise wedge the calling thread forever.
       // Plain latch.await() only bounds the total duration, so a transfer that
-      // stalls at 30% would sit here for the full 30 minutes. Poll instead and
-      // give up once the body stops advancing.
-      val hardDeadlineNanos = System.nanoTime() + UPLOAD_TIMEOUT_SECONDS * 1_000_000_000L
+      // stalls at 30% would sit here for the full timeout. Poll instead and give
+      // up once the body stops advancing.
+      //
+      // The cap scales with the file: a flat 30 minutes is generous for a 20 MB
+      // video and far too tight for a 5 GB one on a slow link, where it would
+      // fail an upload that was still making steady progress. The idle check
+      // above is the real stall detector; this only bounds runaway duration.
+      val hardDeadlineNanos = System.nanoTime() + uploadTimeoutSeconds(fileLength) * 1_000_000_000L
       var finished = false
       while (true) {
         if (latch.await(1, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -480,10 +485,24 @@ internal class StreamingFileUploader(
   companion object {
     private const val BUFFER_SIZE = 256 * 1024
 
-    /** Absolute cap for one upload attempt. */
-    private const val UPLOAD_TIMEOUT_SECONDS = 60L * 30
+    /** Floor for the absolute cap on one upload attempt. */
+    private const val MIN_UPLOAD_TIMEOUT_SECONDS = 60L * 30
+
+    /**
+     * Assumed worst-case throughput used to size the cap, in bytes per second.
+     * Deliberately pessimistic (~0.5 Mbps): the cap exists to stop a runaway
+     * request, not to police slow links, and a false timeout on a healthy upload
+     * is worse than waiting longer.
+     */
+    private const val ASSUMED_MIN_BYTES_PER_SECOND = 64L * 1024
 
     /** Give up when the body has not advanced at all for this long. */
     private const val IDLE_TIMEOUT_MS = 60_000L
+
+    /** Cap that grows with the file so large uploads are not cut off mid-transfer. */
+    private fun uploadTimeoutSeconds(fileLength: Long): Long {
+      val estimated = fileLength / ASSUMED_MIN_BYTES_PER_SECOND
+      return maxOf(MIN_UPLOAD_TIMEOUT_SECONDS, estimated)
+    }
   }
 }

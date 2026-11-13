@@ -14,6 +14,7 @@ import 'package:immich_mobile/domain/services/sync_stream.service.dart';
 // ignore: library_prefixes
 import 'package:immich_mobile/entities/store.entity.dart' as dbStore;
 import 'package:immich_mobile/extensions/platform_extensions.dart';
+import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/platform/background_worker_api.g.dart';
 import 'package:immich_mobile/platform/background_worker_lock_api.g.dart';
@@ -277,6 +278,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       _ref?.dispose();
       _ref = null;
+
+      // This isolate built its own Cronet engine. Release it now: the isolate is
+      // about to be torn down and the engine otherwise keeps its native threads
+      // and 64 MiB cache alive until the process exits.
+      NetworkRepository.dispose();
     } catch (error, stack) {
       dPrint(() => 'Failed to cleanup background worker: $error with stack: $stack');
     }
@@ -403,6 +409,11 @@ class BackgroundWorkerLockService {
 Future<void> backgroundSyncNativeEntrypoint() async {
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+
+  // This runs in the worker's own isolate, which does not inherit the handler
+  // registered in main(). Without it every progress tick from the native
+  // streaming uploader arrives with no listener and is logged as an error.
+  StreamingUploadProgressApi.setUp(StreamingUploadProgressHandler());
 
   final (dataController, apiService) = await Bootstrap.initDomain(shouldBufferLogs: false, disableStoreWatching: true);
   await BackgroundWorkerBgService(dataController: dataController, apiService: apiService).init();
