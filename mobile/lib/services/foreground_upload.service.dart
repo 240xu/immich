@@ -371,8 +371,10 @@ class ForegroundUploadService {
         if (livePhotoResult.isCancelled) {
           // The pair is uploaded together; a cancelled video means the whole
           // asset was cancelled, so uploading the still image here would create
-          // an orphan on the server.
-          shouldAbortUpload = true;
+          // an orphan on the server. Returning is enough to skip it -- the loop
+          // already breaks on a completed cancel token, and setting the
+          // service-wide shouldAbortUpload here would abort unrelated runs that
+          // share this service instance.
           callbacks.onCancelled?.call(asset.localId!);
           return;
         }

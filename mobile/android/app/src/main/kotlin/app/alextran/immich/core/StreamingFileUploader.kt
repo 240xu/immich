@@ -82,6 +82,11 @@ internal class StreamingFileUploader(
     progressKey: String,
   ): Outcome {
     if (!file.isFile) {
+      // A cancel can arrive between the Dart call and this point (the upload was
+      // queued, then cancelled, then the file vanished). The tombstone is added by
+      // cancel() before upload() runs, so it has to be cleared here -- this return
+      // happens before the try/finally that normally removes it.
+      cancelRequested.remove(progressKey)
       return Outcome(false, 0, null, "File not found: ${file.path}")
     }
 
@@ -128,7 +133,14 @@ internal class StreamingFileUploader(
         if (byteBuffer.hasRemaining()) {
           val chunk = ByteArray(byteBuffer.remaining())
           byteBuffer.get(chunk)
-          responseBytes.write(chunk, 0, chunk.size)
+          // A successful upload answers with a small JSON body; anything larger is
+          // an error page from a proxy or something equally unexpected. Cap what
+          // we keep so a huge response cannot exhaust the heap -- the status code
+          // is what matters at that point, not the body.
+          if (responseBytes.size() < MAX_RESPONSE_BYTES) {
+            val room = MAX_RESPONSE_BYTES - responseBytes.size()
+            responseBytes.write(chunk, 0, minOf(chunk.size, room))
+          }
         }
         byteBuffer.clear()
         request.read(byteBuffer)
@@ -263,6 +275,15 @@ internal class StreamingFileUploader(
     fields.forEach { (name, value) ->
       out.append("--").append(boundary).append("\r\n")
       out.append("Content-Disposition: form-data; name=\"").append(name.escapeQuotes()).append("\"\r\n")
+      // Upstream's MultipartRequest adds these two headers when a field value
+      // contains non-ASCII bytes, because multipart parsers default to latin1 and
+      // would otherwise mangle the value. Today every field we send is ASCII
+      // (UUIDs, ISO timestamps, enum names), but the header set has to stay
+      // equivalent to the Dart path for anything added later.
+      if (value.any { it.code > 127 }) {
+        out.append("content-type: text/plain; charset=utf-8\r\n")
+        out.append("content-transfer-encoding: binary\r\n")
+      }
       out.append("\r\n")
       out.append(value).append("\r\n")
     }
@@ -484,6 +505,13 @@ internal class StreamingFileUploader(
 
   companion object {
     private const val BUFFER_SIZE = 256 * 1024
+
+    /**
+     * Upper bound on the response body kept in memory. A successful upload replies
+     * with a small JSON object; this only guards against a proxy or server sending
+     * an enormous error page.
+     */
+    private const val MAX_RESPONSE_BYTES = 1024 * 1024
 
     /** Floor for the absolute cap on one upload attempt. */
     private const val MIN_UPLOAD_TIMEOUT_SECONDS = 60L * 30

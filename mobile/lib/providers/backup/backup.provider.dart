@@ -134,13 +134,17 @@ class BackupNotifier extends StateNotifier<BackupState> {
     state = state.copyWith(isSyncing: isSyncing);
   }
 
-  Future<void> startForegroundBackup(String userId) async {
+  Future<void> startForegroundBackup(String userId, {bool restart = false}) async {
     // A resume and a splash resume can both land here for the same user within
     // milliseconds. Letting the second one through would cancel the first run's
     // token and then immediately start a duplicate pass, which shows up as the
     // progress bar jumping around. Join the run that is already going instead.
+    //
+    // User-initiated starts pass restart: true. Upstream cancels and restarts in
+    // that case, which is what makes "I took a new photo, back it up now" work --
+    // joining would keep serving the candidate list captured by the older run.
     final activeRun = _activeBackupRun;
-    if (activeRun != null && _activeBackupUserId == userId) {
+    if (!restart && activeRun != null && _activeBackupUserId == userId) {
       _logger.info("Foreground backup for $userId already running, joining it");
       return activeRun;
     }

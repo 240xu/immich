@@ -187,17 +187,23 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
       // Pigeon replies must go out on the platform thread; this runs on the
       // upload thread.
       mainHandler.post {
-        callback(
-          Result.success(
-            StreamingUploadResult(
-              outcome.isSuccess,
-              // Pigeon maps Dart int to Kotlin Long.
-              outcome.statusCode.toLong(),
-              outcome.body,
-              outcome.errorMessage,
+        // The engine can be destroyed while the upload is in flight (background
+        // worker finishing, activity torn down). Replying on a dead
+        // BinaryMessenger throws, and an exception on the main looper crashes the
+        // process -- which would turn a completed upload into a crash.
+        runCatching {
+          callback(
+            Result.success(
+              StreamingUploadResult(
+                outcome.isSuccess,
+                // Pigeon maps Dart int to Kotlin Long.
+                outcome.statusCode.toLong(),
+                outcome.body,
+                outcome.errorMessage,
+              ),
             ),
-          ),
-        )
+          )
+        }
       }
     }.start()
   }

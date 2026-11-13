@@ -101,7 +101,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
         return;
       }
       try {
-        await backupNotifier.startForegroundBackup(currentUser.id);
+        await backupNotifier.startForegroundBackup(currentUser.id, restart: true);
       } catch (error, stackTrace) {
         // startForegroundBackup rethrows so joiners share the failure; the page
         // has already surfaced it through backupProvider.error, so log and stop

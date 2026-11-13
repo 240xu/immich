@@ -64,6 +64,15 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
   }
 
   override fun startWork(): ListenableFuture<Result> {
+    // WorkManager can still hold a task that was queued before the user turned
+    // background sync off (or before an upgrade, where the preference key does not
+    // exist yet). Nothing else checks the switch on this path, so without this the
+    // run would start an engine and upload anyway.
+    if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+      Log.i(TAG, "Background sync disabled, skipping worker start")
+      return Futures.immediateFuture(Result.success())
+    }
+
     if (!activeWorker.compareAndSet(null, this)) {
       // Another worker already owns the upload. Reporting success keeps
       // WorkManager's backoff from growing; the running worker is doing the work.

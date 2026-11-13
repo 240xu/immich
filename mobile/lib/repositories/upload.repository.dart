@@ -66,11 +66,12 @@ class UploadRepository {
     // that, but only when not a single byte reached the server: a resend after a
     // partial body could leave a half-written asset plus a duplicate.
     for (var attempt = 0; ; attempt++) {
-      // The native request table lives in the process-wide Kotlin object, so the
-      // key must be unique per attempt -- not just per asset. Without the counter,
-      // the foreground and background isolates uploading the same asset would
-      // fight over one entry: the second overwrites the first, and cancelling
-      // either aborts the wrong request.
+      // The key must be unique per attempt, not just per asset: a retry reuses the
+      // asset but must not collide with the previous attempt's native request
+      // entry. The salt and counter are belt-and-braces -- NetworkApiImpl is
+      // created per FlutterEngine, so its request tables are per-engine rather
+      // than process-wide, but keeping keys globally distinct costs nothing and
+      // avoids relying on that detail.
       final progressKey = '$logContext:${file.path}#$_uploadKeySalt-${_streamingUploadSeq++}';
       var bytesSent = 0;
       if (onProgress != null) {
@@ -163,12 +164,10 @@ class UploadRepository {
   /// overwrite each other's progress.
   static final Map<String, void Function(int, int)> _streamingProgressListeners = {};
 
-  /// Salt per isolate. The native request table is process-wide while this
-  /// counter is not, so a bare sequence number would collide again once the
-  /// background isolate starts from zero; the salt keeps keys unique across both.
-  ///
-  /// 31 random bits leaves a 1-in-2^31 collision chance between the two
-  /// isolates, which is far below the probability of a duplicate key mattering.
+  /// Salt per isolate. The native request tables live in the per-engine
+  /// [NetworkApiImpl], so a bare sequence number would not actually collide across
+  /// isolates; the salt is defensive, keeping keys distinct even if that ever
+  /// becomes a process-wide table again.
   static final String _uploadKeySalt =
       math.Random().nextInt(0x7FFFFFFF).toRadixString(36);
   static int _streamingUploadSeq = 0;

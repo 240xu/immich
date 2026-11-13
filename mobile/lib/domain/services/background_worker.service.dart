@@ -100,6 +100,14 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   bool get _isBackupEnabled => SettingsRepository.instance.appConfig.backup.enabled;
 
+  /// Whether the user has the background-sync switch on.
+  ///
+  /// Separate from [_isBackupEnabled]: the switch controls whether the app is
+  /// allowed to sync and upload while backgrounded at all, which is what gates the
+  /// schedulers. Read from settings each time because the background isolate gets
+  /// no notification when the value changes.
+  bool get _isBackgroundSyncEnabled => SettingsRepository.instance.appConfig.backup.backgroundSync;
+
   Future<void> init() async {
     try {
       await Future.wait(
@@ -133,6 +141,13 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   @override
   Future<bool> onAndroidUpload(int? maxMinutes) async {
+    // Enforced here as well as in the native scheduler: WorkManager can hand us a
+    // run that was queued before the switch was turned off, and startWork() has no
+    // way to know the Dart-side setting.
+    if (!_isBackgroundSyncEnabled) {
+      _logger.info("Background sync is disabled. Skipping the whole run");
+      return false;
+    }
     final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
     final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
     await _optimizeDB();
@@ -145,6 +160,13 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   @override
   Future<void> onIosUpload(bool isRefresh, int? maxSeconds) async {
+    // iOS reschedules itself from handleBackgroundRefresh/handleBackgroundProcessing
+    // without consulting Dart, so the switch has to be enforced at this entry point
+    // or it does nothing on iOS at all.
+    if (!_isBackgroundSyncEnabled) {
+      _logger.info("Background sync is disabled. Skipping the whole run");
+      return;
+    }
     _logger.info('iOS background upload started with maxSeconds: ${maxSeconds}s');
     final sw = Stopwatch()..start();
     try {
@@ -297,6 +319,16 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       if (!_isBackupEnabled) {
         _logger.info("Backup is disabled. Skipping backup routine");
+        return false;
+      }
+
+      // The background-sync switch has to be enforced here as well as in the
+      // native schedulers. Android's WorkManager can still hand us a run that was
+      // queued before the switch was turned off, and iOS reschedules itself from
+      // inside handleBackgroundRefresh/handleBackgroundProcessing without ever
+      // consulting Dart. This is the one place every platform funnels through.
+      if (!SettingsRepository.instance.appConfig.backup.backgroundSync) {
+        _logger.info("Background sync is disabled. Skipping backup routine");
         return false;
       }
 

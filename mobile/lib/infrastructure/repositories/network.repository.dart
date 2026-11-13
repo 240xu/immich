@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 
@@ -151,10 +152,26 @@ class _CronetAuthClient extends http.BaseClient {
   /// The Cronet engine's cookie store cannot be cleared through the API, so a
   /// logout has to replace the engine. Callers keep a reference to this wrapper
   /// (e.g. `ApiService._apiClient.client`), so it must survive the swap.
+  ///
+  /// The old engine is closed on a delay rather than immediately: closing it
+  /// calls `CronetEngine.shutdown()`, which cancels *every* request still in
+  /// flight on that engine. Logout happens while the UI is still fetching
+  /// (backup status, album metadata), and those requests would come back as
+  /// `RequestAbortedException` -- which the upload path treats as a user
+  /// cancellation. A short grace period lets them finish; the cost is that the
+  /// old engine's 64 MiB cache outlives the swap by a few seconds.
   void reset(http.Client inner) {
     final previous = _inner;
     _inner = inner;
-    previous.close();
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 30), () {
+        try {
+          previous.close();
+        } catch (_) {
+          // Closing is best-effort: a failure here must not break logout.
+        }
+      }),
+    );
   }
 
   @override
