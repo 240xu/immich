@@ -103,6 +103,10 @@ class ForegroundUploadService {
   }) async {
     final candidates = await _backupRepository.getCandidates(userId);
     if (candidates.isEmpty) {
+      // Log it: returning silently made a run with nothing to upload
+      // indistinguishable from a run that uploaded everything successfully, so
+      // "0 uploads failed" told the caller nothing.
+      _logger.info('No backup candidates for $userId');
       return;
     }
 
