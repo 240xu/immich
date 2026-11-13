@@ -18,9 +18,9 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
     private const val DEFAULT_REQUIRE_CHARGING = false
     private const val DEFAULT_NOTIF_TITLE = "Uploading media"
     private const val DEFAULT_NOTIF_MSG = "Checking for new assets…"
-    // Matches the app-side default: background sync is opt-in on this fork. The
-    // value is written on every launch (enable() or disable()), so this default
-    // only matters for the window before the first frame.
+      // Matches the app-side default: background sync is opt-in on this fork.
+      // Written on every launch, so this only covers the window before the first
+      // frame.
     private const val DEFAULT_SYNC_ENABLED = false
   }
 
@@ -71,11 +71,10 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
     return sp.getBoolean(SHARED_PREF_LOCK_KEY, true)
   }
 
-  /// Whether background sync and upload is switched on in the app's settings.
-  ///
-  /// Kept natively so every enqueue path can honour it, including the ones that
-  /// run before Dart is up (`ImmichApp.onCreate`) or that are triggered by an
-  /// unrelated setting change (`configure`).
+    /// Whether background sync and upload is switched on in the app's settings.
+    ///
+    /// Kept natively so every enqueue path can honour it, including the ones that
+    /// run before Dart is up.
   fun setSyncEnabled(enabled: Boolean) {
     sp.edit {
       putBoolean(SHARED_PREF_SYNC_ENABLED_KEY, enabled)

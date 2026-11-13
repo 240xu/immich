@@ -58,10 +58,9 @@ class SyncStreamService {
 
   Future<bool> sync({Future<void>? abortSignal}) async {
     _logger.info("Remote sync request for user");
-    // Both signals must be honoured: a caller-supplied deadline *and* this
-    // isolate's cancellation token. Using `abortSignal ?? _cancellation` silently
-    // disabled the latter, so a cancelled worker kept its HTTP stream open until
-    // the next batch boundary -- or forever if the server went silent.
+      // Both signals must be honoured: a caller-supplied deadline and this
+      // isolate's cancellation token. Using `abortSignal ?? _cancellation` silently
+      // disabled the latter.
     final cancellation = _cancellation;
     final signals = <Future<void>>[
       if (abortSignal != null) abortSignal,
@@ -111,10 +110,9 @@ class SyncStreamService {
       await Store.put(StoreKey.syncMigrationStatus, jsonEncode(migrations));
     }
 
-    // streamChanges returns normally when the abort signal fires, so without this
-    // an aborted sync would report success and the caller would go on to upload
-    // against a half-applied remote state. Only the isolate token is observable
-    // here; a caller's deadline is enforced by the caller itself.
+      // streamChanges returns normally when the abort signal fires, so without this
+      // an aborted sync would report success and the caller would upload against a
+      // half-applied remote state.
     if (isCancelled) {
       _logger.warning("Remote sync aborted");
       return false;

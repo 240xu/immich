@@ -80,11 +80,10 @@ class BackupNotifier extends StateNotifier<BackupState> {
   /// created with, so anything from a stopped run is discarded on arrival.
   int _backupGeneration = 0;
 
-  // Which user the in-flight foreground backup belongs to, and a handle on that
-  // run. Resume and splash can both ask for a backup of the same user at almost
-  // the same time; without this the second call cancels the first run's token and
-  // starts a duplicate upload pass over the same assets. The two passes then
-  // overwrite each other's progress and race on the same rows.
+    // Which user the in-flight foreground backup belongs to, and a handle on that
+    // run. Resume and splash can both ask for the same user at almost the same
+    // time; without this the second cancels the first token and starts a duplicate
+    // pass over the same assets.
   String? _activeBackupUserId;
   Future<void>? _activeBackupRun;
 
@@ -135,14 +134,11 @@ class BackupNotifier extends StateNotifier<BackupState> {
   }
 
   Future<void> startForegroundBackup(String userId, {bool restart = false}) async {
-    // A resume and a splash resume can both land here for the same user within
-    // milliseconds. Letting the second one through would cancel the first run's
-    // token and then immediately start a duplicate pass, which shows up as the
-    // progress bar jumping around. Join the run that is already going instead.
+    // A resume and a splash resume can both land here within milliseconds. Letting
+    // the second through would cancel the first run and start a duplicate pass.
     //
-    // User-initiated starts pass restart: true. Upstream cancels and restarts in
-    // that case, which is what makes "I took a new photo, back it up now" work --
-    // joining would keep serving the candidate list captured by the older run.
+    // User-initiated starts pass restart: true, which cancels and restarts so that
+    // "I took a new photo, back it up now" sees the new candidate list.
     final activeRun = _activeBackupRun;
     if (!restart && activeRun != null && _activeBackupUserId == userId) {
       _logger.info("Foreground backup for $userId already running, joining it");
@@ -161,19 +157,16 @@ class BackupNotifier extends StateNotifier<BackupState> {
     _cancelToken = cancelToken;
 
     // Identity for this run. Callbacks from a stopped run can arrive minutes
-    // later (an in-flight native upload only notices the cancel when Cronet
-    // reacts); without this they would be counted into the *next* run --
-    // decrementing its remainder and overwriting its progress.
+    // later and would otherwise be counted into the next one.
     final generation = ++_backupGeneration;
 
     // Claim the slot before the first await so a call arriving during the
     // backup-status recount still joins this run instead of cancelling it.
     final runGuard = Completer<void>();
     _activeBackupUserId = userId;
-    // Joiners await this. Mark the error as observed up front: most runs have no
-    // joiner at all, and completeError() on an unlistened Future would surface as
-    // an unhandled async error. Joiners attach their own listener to the same
-    // future, so they still see the failure.
+    // Mark the error as observed up front: most runs have no joiner, and
+    // completeError() on an unlistened Future would surface as an unhandled
+    // async error.
     _activeBackupRun = runGuard.future;
     unawaited(runGuard.future.then<void>((_) {}, onError: (Object _, StackTrace __) {}));
 
@@ -234,10 +227,9 @@ class BackupNotifier extends StateNotifier<BackupState> {
     }
   }
 
-  /// Cancel path for an upload that stopped inside the current run. Does not
-  /// insert an item: the row is either gone already (the run was stopped, which
-  /// clears uploadItems) or owned by a newer run, and re-adding it would
-  /// resurrect a row the user just dismissed.
+    /// Cancel path for an upload that stopped inside the current run. Does not
+    /// insert an item: the row is either gone already or owned by a newer run, and
+    /// re-adding it would resurrect a row the user just dismissed.
   void _handleForegroundBackupCancelled(int generation, String localAssetId) {
     if (!mounted || generation != _backupGeneration) {
       return;

@@ -13,16 +13,14 @@ class NetworkRepository {
   static http.Client? _client;
   static Pointer<Void>? _clientPointer;
 
-  /// Whether the current client was built for mutual TLS. Tracked separately from
-  /// [_clientPointer] because installing or removing a client certificate keeps
-  /// the pointer the same but changes which transport can actually connect.
+  /// Tracked separately from [_clientPointer]: installing or removing a client
+  /// certificate keeps the pointer but changes which transport can connect.
   static bool _usingMtls = false;
 
   static Future<void> init() async {
     final clientPointer = Pointer<Void>.fromAddress(await networkApi.getClientPointer());
-    // A client certificate changes which transport is usable, so it has to be part
-    // of the "nothing to do" check -- otherwise installing one after init() leaves
-    // the Cronet client in place and every request fails the TLS handshake.
+    // Part of the "nothing to do" check: installing a certificate after init()
+    // would otherwise leave Cronet in place and every request would fail.
     final mtls = Platform.isIOS ? false : await networkApi.hasCertificate();
     if (clientPointer == _clientPointer && mtls == _usingMtls) {
       return;
@@ -34,9 +32,8 @@ class NetworkRepository {
       final session = URLSession.fromRawPointer(clientPointer.cast());
       _client = CupertinoClient.fromSharedSession(session);
     } else if (mtls) {
-      // Cronet cannot be given a client certificate (see HttpClientManager's image
-      // loader, which falls back to OkHttp for the same reason), so mTLS users stay
-      // on the native OkHttp client with its configured timeouts.
+      // Cronet cannot present a client certificate, so mTLS users stay on the
+      // native OkHttp client.
       _client?.close();
       _client = OkHttpClient.fromJniGlobalRef(
         clientPointer,
@@ -47,9 +44,9 @@ class NetworkRepository {
         ),
       );
     } else {
-      // Keep the wrapper object identity stable when one already exists: callers
-      // hold a snapshot of it (ApiService._apiClient.client), so replacing the
-      // wrapper would leave them holding a closed client.
+      // Keep the wrapper identity stable: callers hold a snapshot of it
+      // (ApiService._apiClient.client), so replacing it would leave them holding a
+      // closed client.
       final engine = await _buildCronetClient();
       final current = _client;
       if (current is _CronetAuthClient) {
@@ -90,13 +87,8 @@ class NetworkRepository {
     }
   }
 
-  /// Clears the session cookies.
-  ///
-  /// The native persistent jar is cleared directly. The Cronet engine keeps its own
-  /// cookie store and exposes no API to clear it, so the engine is replaced --
-  /// in place, keeping this wrapper's identity intact, because callers hold a
-  /// snapshot of the client (`ApiService._apiClient.client`). Swapping the object
-  /// itself would leave them holding a closed one.
+  /// Clears the session cookies. The native jar is cleared directly; Cronet's own
+  /// cookie store has no clear API, so the engine is replaced in place.
   static Future<void> clearCookies() async {
     await networkApi.clearCookies();
     if (Platform.isAndroid && !_usingMtls) {
@@ -107,12 +99,8 @@ class NetworkRepository {
     }
   }
 
-  /// Releases the client and the native engine behind it.
-  ///
-  /// Each isolate builds its own Cronet engine, and the engine holds native
-  /// threads and a 64 MiB cache until `shutdown()` runs. Isolates are torn down
-  /// regularly (every background worker run), so they must release it explicitly
-  /// rather than rely on the isolate dying.
+  /// Releases the client and the native engine behind it. Each isolate builds its
+  /// own engine, holding native threads and a 64 MiB cache until `shutdown()`.
   static void dispose() {
     _client?.close();
     _client = null;
@@ -120,28 +108,17 @@ class NetworkRepository {
     _usingMtls = false;
   }
 
-  /// Returns a shared HTTP client that uses native SSL configuration.
-  ///
-  /// On iOS: Uses SharedURLSessionManager's URLSession.
-  /// On Android: Uses a Cronet client sharing the native configuration.
-  ///
-  /// Must call [init] before using this method.
+  /// Shared HTTP client with native SSL configuration. Must call [init] first.
   static http.Client get client => _client!;
 
-  /// Whether the active client is the native OkHttp one because a client
-  /// certificate is installed. Callers that bypass [client] -- the native
-  /// streaming uploader talks to Cronet directly -- must consult this first,
-  /// because Cronet cannot present a client certificate.
+  /// Whether the active client is OkHttp because a client certificate is
+  /// installed. Callers that bypass [client] -- the native streaming uploader
+  /// talks to Cronet directly -- must consult this first.
   static bool get usingMtls => _usingMtls;
 }
 
-/// Attaches the headers the native client would have attached.
-///
-/// Cronet cannot be given OkHttp-style interceptors, so the auth headers have to be
-/// copied onto each request. Cookie lifetime is left to the Cronet engine's own
-/// store: the native jar is the single source of truth (it parses Set-Cookie per
-/// RFC 6265 and syncs cookies across server URLs), and re-implementing that here
-/// produced a weaker second copy that could disagree with it.
+/// Attaches the headers the native client would have attached: Cronet cannot be
+/// given OkHttp-style interceptors, so they are copied onto each request.
 class _CronetAuthClient extends http.BaseClient {
   _CronetAuthClient(this._inner);
 
@@ -149,17 +126,9 @@ class _CronetAuthClient extends http.BaseClient {
 
   /// Swaps the underlying client without changing this object's identity.
   ///
-  /// The Cronet engine's cookie store cannot be cleared through the API, so a
-  /// logout has to replace the engine. Callers keep a reference to this wrapper
-  /// (e.g. `ApiService._apiClient.client`), so it must survive the swap.
-  ///
-  /// The old engine is closed on a delay rather than immediately: closing it
-  /// calls `CronetEngine.shutdown()`, which cancels *every* request still in
-  /// flight on that engine. Logout happens while the UI is still fetching
-  /// (backup status, album metadata), and those requests would come back as
-  /// `RequestAbortedException` -- which the upload path treats as a user
-  /// cancellation. A short grace period lets them finish; the cost is that the
-  /// old engine's 64 MiB cache outlives the swap by a few seconds.
+  /// The old engine is closed on a delay: `CronetEngine.shutdown()` cancels every
+  /// in-flight request, and those aborts reach the upload path as
+  /// `RequestAbortedException`, which it treats as a user cancellation.
   void reset(http.Client inner) {
     final previous = _inner;
     _inner = inner;
@@ -176,23 +145,18 @@ class _CronetAuthClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    // The native client owns header construction: it knows the persisted headers,
-    // the cookie jar (parsed per RFC 6265, synced across server URLs) and any Basic
-    // credentials embedded in the URL. Copy its answer onto the request instead of
-    // reconstructing it here.
+    // The native client owns header construction (persisted headers, cookie jar,
+    // Basic credentials in the URL), so copy its answer rather than rebuilding it.
     //
-    // Overwrite unconditionally, matching the OkHttp interceptor this replaces
-    // (HttpClientManager: `builder.header(key, value)`): user-configured headers
-    // must win over whatever the API client set by default.
+    // Overwrite unconditionally, matching the OkHttp interceptor this replaces:
+    // user-configured headers must win over the API client's defaults.
     final headers = await networkApi.requestAuthHeaders(request.url.toString());
     headers.forEach((k, v) => request.headers[k] = v);
 
-    // Cronet follows redirects by replaying the same UrlRequest, so the Cookie and
-    // Authorization headers set above would travel to the redirect target too --
-    // OkHttp strips them on a host change, Cronet does not. This is not disabled
-    // here because Immich deployments commonly rely on a same-origin 301/302
-    // (http -> https at a reverse proxy), and breaking that would be worse than
-    // the exposure. Cross-host redirects are the caller's responsibility.
+    // Cronet replays the same UrlRequest across redirects, so Cookie/Authorization
+    // travel to the redirect target too (OkHttp strips them on host change).
+    // Automatic following stays on because Immich deployments commonly rely on a
+    // same-origin http -> https 301 at the reverse proxy.
     return _inner.send(request);
   }
 

@@ -100,12 +100,8 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   bool get _isBackupEnabled => SettingsRepository.instance.appConfig.backup.enabled;
 
-  /// Whether the user has the background-sync switch on.
-  ///
-  /// Separate from [_isBackupEnabled]: the switch controls whether the app is
-  /// allowed to sync and upload while backgrounded at all, which is what gates the
-  /// schedulers. Read from settings each time because the background isolate gets
-  /// no notification when the value changes.
+  /// Whether the user has the background-sync switch on. Read from settings each
+  /// time: the background isolate gets no notification when the value changes.
   bool get _isBackgroundSyncEnabled => SettingsRepository.instance.appConfig.backup.backgroundSync;
 
   Future<void> init() async {
@@ -177,11 +173,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         await _optimizeDB();
       }
 
-      // Run sync local, sync remote, hash and backup concurrently so the bg
-      // refresh task (20s budget) can make progress on all four instead of
-      // racing them sequentially. Hash tolerates stale reads, but a new backup
-      // batch waits for the remote sync. The single budget caps the
-      // whole batch; no phase needs its own timeout.
+      // Run the four phases concurrently so the bg refresh task (20s budget) can
+      // make progress on all of them. A new backup batch waits for the remote
+      // sync; the single budget caps the whole batch.
       final remoteSync = _remoteSyncService.sync();
       final all = Future.wait<dynamic>([
         _localSyncService.sync(),
@@ -322,11 +316,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         return false;
       }
 
-      // The background-sync switch has to be enforced here as well as in the
-      // native schedulers. Android's WorkManager can still hand us a run that was
-      // queued before the switch was turned off, and iOS reschedules itself from
-      // inside handleBackgroundRefresh/handleBackgroundProcessing without ever
-      // consulting Dart. This is the one place every platform funnels through.
+      // Enforced here as well as in the native schedulers: WorkManager can hand us
+      // a run queued before the switch was turned off, and iOS reschedules itself
+      // without consulting Dart. Every platform funnels through here.
       if (!SettingsRepository.instance.appConfig.backup.backgroundSync) {
         _logger.info("Background sync is disabled. Skipping backup routine");
         return false;
@@ -352,9 +344,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         callbacks: UploadCallbacks(
           onError: (_, _) => failed++,
           // Tracked separately from failures: a cancel means the run was stopped
-          // (timeout, user stop, app going idle), so it must not turn into a
-          // retry. Counting it as a failure made the worker immediately enqueue
-          // another run, and that run would be cancelled again.
+          // (timeout, user stop, app idle), so it must not turn into a retry.
           onCancelled: (_) => cancelled++,
         ),
         useSequentialUpload: true,
@@ -376,14 +366,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       return false;
     }
 
-    // A remote sync that never returns wedges the whole background run: no
-    // backup starts, no "finished" line is logged, and the worker sits RUNNING
-    // until the OS kills it. The foreground path makes the same call but the
-    // user is watching the UI; here nothing would ever notice.
-    //
-    // The timeout needs its own abort signal: Future.timeout() only completes the
-    // outer Future, so without this the abandoned sync keeps acking batches and
-    // writing to the database -- including after _cleanup() has closed it.
+    // A remote sync that never returns wedges the whole run. The timeout needs its
+    // own abort signal: Future.timeout() only completes the outer Future, so
+    // without it the abandoned sync keeps writing to a closed database.
     final syncAbort = Completer<void>();
     final isSuccess = await _remoteSyncService.sync(abortSignal: syncAbort.future).timeout(
       remoteSyncTimeout,

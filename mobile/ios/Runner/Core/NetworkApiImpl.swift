@@ -105,13 +105,12 @@ class NetworkApiImpl: NetworkApi {
     URLSessionManager.clearCookies()
   }
 
-  /// Headers the native client would attach to [url]: the user-configured headers
-  /// plus the session cookies for that host.
-  ///
-  /// Only used by the Android Cronet path, which cannot read the native client's
-  /// configuration the way OkHttp's interceptors can. Provided on iOS as well so
-  /// the Pigeon protocol is satisfied and the call has a sane answer if it is ever
-  /// reached.
+    /// Headers the native client would attach to [url]: the user-configured headers
+    /// plus the session cookies for that host.
+    ///
+    /// Only used by the Android Cronet path, which cannot read the native client's
+    /// configuration the way OkHttp interceptors can. Implemented on iOS so the
+    /// Pigeon protocol is satisfied.
   func requestAuthHeaders(url: String) throws -> [String: String] {
     var headers = UserDefaults.group.dictionary(forKey: HEADERS_KEY) as? [String: String] ?? [:]
     headers["User-Agent"] = headers["User-Agent"] ?? URLSessionManager.userAgent
@@ -148,9 +147,8 @@ class NetworkApiImpl: NetworkApi {
     progressKey: String,
     completion: @escaping (Result<StreamingUploadResult, any Error>) -> Void
   ) {
-    // Streaming uploads exist to work around cronet_http buffering the whole body.
-    // iOS uses URLSession, which streams by itself, so the Dart client is the
-    // supported path there and this entry point is never taken.
+      // iOS uses URLSession, which streams by itself, so the Dart client is the
+      // supported path and this entry point is never taken.
     completion(
       .success(
         StreamingUploadResult(

@@ -64,10 +64,9 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
   }
 
   override fun startWork(): ListenableFuture<Result> {
-    // WorkManager can still hold a task that was queued before the user turned
-    // background sync off (or before an upgrade, where the preference key does not
-    // exist yet). Nothing else checks the switch on this path, so without this the
-    // run would start an engine and upload anyway.
+      // WorkManager can still hold a task queued before the user turned background
+      // sync off (or before an upgrade, where the key does not exist yet). Nothing
+      // else checks the switch on this path.
     if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
       Log.i(TAG, "Background sync disabled, skipping worker start")
       return Futures.immediateFuture(Result.success())
@@ -81,12 +80,10 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
     }
 
     if (BackgroundWorkerPreferences(ctx).isLocked() && BackgroundEngineLock.connectEngines > 0) {
-      // The foreground engine is mid-backup, so it is already doing what this
-      // worker would do. Report success rather than retry: a retry would feed
-      // WorkManager's exponential backoff every time a foreground backup
-      // overlaps a scheduled run, pushing the next attempt out to minutes and
-      // then hours. PeriodicWorker and MediaObserver pick the work up again once
-      // the app is idle.
+        // The foreground engine is mid-backup, so it is already doing what this
+        // worker would do. Report success rather than retry: a retry feeds
+        // WorkManager's exponential backoff every time a foreground backup overlaps
+        // a scheduled run, pushing the next attempt out to minutes.
       Log.i(TAG, "Foreground engine active, skipping background worker")
       activeWorker.compareAndSet(this, null)
       return Futures.immediateFuture(Result.success())

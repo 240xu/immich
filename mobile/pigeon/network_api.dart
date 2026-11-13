@@ -23,13 +23,13 @@ class StreamingUploadResult {
   String? body;
   String? errorMessage;
 
-  /// How many body bytes actually reached the wire before the request ended.
-  ///
-  /// The Dart side uses this to decide whether a failed transfer may be resent:
-  /// once bytes are on the wire the server may already have written part of the
-  /// asset, so a resend could duplicate it. Progress callbacks cannot be used for
-  /// this because they are optional and a caller that does not subscribe would
-  /// see zero bytes no matter how much was sent.
+    /// How many body bytes actually reached the wire before the request ended.
+    ///
+    /// The Dart side uses this to decide whether a failed transfer may be resent:
+    /// once bytes are on the wire the server may already have written part of the
+    /// asset, so a resend could duplicate it. Progress callbacks cannot be used --
+    /// they are optional, so a caller that does not subscribe sees zero bytes
+    /// regardless of what was sent.
   int bytesSent;
 
   StreamingUploadResult(this.isSuccess, this.statusCode, this.body, this.errorMessage, this.bytesSent);
@@ -86,9 +86,8 @@ abstract class NetworkApi {
   /// it off disk rather than buffering the whole payload in memory.
   ///
   /// `package:cronet_http` calls `stream.toBytes()` before handing the body to
-  /// Cronet, so any payload larger than the heap kills the process. This entry
-  /// point exists only to bypass that buffering; small uploads stay on the
-  /// regular Dart client.
+  /// Cronet, so any payload larger than the heap kills the process. Small uploads
+  /// stay on the regular Dart client.
   ///
   /// Returns the raw response body on 2xx, and a result describing the failure
   /// otherwise. Progress is reported through [StreamingUploadProgressApi].

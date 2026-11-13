@@ -50,9 +50,8 @@ class UploadRepository {
 
   /// Uploads through the native Cronet uploader, which streams the file off disk.
   ///
-  /// Always returns a result: a broken transfer comes back as
-  /// [UploadResult.error], never as a silent null that would send the caller
-  /// back to the memory-hungry Dart path.
+  /// Always returns a result; a broken transfer comes back as [UploadResult.error]
+  /// rather than a silent null.
   Future<UploadResult> _uploadFileStreaming({
     required File file,
     required String originalFileName,
@@ -61,17 +60,12 @@ class UploadRepository {
     required String logContext,
     Completer<void>? cancelToken,
   }) async {
-    // Upstream resends once when the request dies before any response arrives
-    // (upload.repository.dart: `on ClientException ... resending once`). Match
-    // that, but only when not a single byte reached the server: a resend after a
-    // partial body could leave a half-written asset plus a duplicate.
+    // Resend once when the request dies before any response arrives, matching the
+    // Dart path. Only when nothing reached the server: a resend after a partial
+    // body could leave a half-written asset plus a duplicate.
     for (var attempt = 0; ; attempt++) {
-      // The key must be unique per attempt, not just per asset: a retry reuses the
-      // asset but must not collide with the previous attempt's native request
-      // entry. The salt and counter are belt-and-braces -- NetworkApiImpl is
-      // created per FlutterEngine, so its request tables are per-engine rather
-      // than process-wide, but keeping keys globally distinct costs nothing and
-      // avoids relying on that detail.
+      // Unique per attempt, not just per asset: a retry must not collide with the
+      // previous attempt's native request entry.
       final progressKey = '$logContext:${file.path}#$_uploadKeySalt-${_streamingUploadSeq++}';
       var bytesSent = 0;
       if (onProgress != null) {
@@ -82,10 +76,9 @@ class UploadRepository {
       }
 
       // Abort the native upload when the caller cancels, otherwise the native
-      // thread keeps streaming long after the backup has been stopped.
-      // Register even for an already-completed token: Completer.future.then fires
-      // immediately in that case, which is exactly the "cancelled while queued"
-      // window we most need to cover.
+      // thread keeps streaming after the backup stopped. Register even for an
+      // already-completed token: then() fires immediately, covering the
+      // "cancelled while queued" window.
       if (cancelToken != null) {
         unawaited(
           cancelToken.future.then((_) => _networkApi.cancelStreamingUpload(progressKey)).catchError((_) {}),
@@ -119,18 +112,15 @@ class UploadRepository {
         }
 
         // Only an abort we asked for is a cancellation. Cronet also cancels the
-        // request itself when the body stalls or the hard deadline hits, and that
-        // is a transport failure -- treating it as a cancel sets shouldAbortUpload
-        // and silently kills the rest of the batch.
+        // request itself on stall or hard deadline, which is a transport failure:
+        // treating that as a cancel sets shouldAbortUpload and kills the batch.
         if (cancelToken?.isCompleted == true) {
           return UploadResult.cancelled();
         }
 
-        // statusCode 0 means no HTTP response at all (connection died, engine
-        // gone). Only then, and only with nothing on the wire, is a resend safe.
-        // The byte count comes from the native side rather than the progress
-        // callback: progress is optional, so a caller that does not subscribe would
-        // report zero bytes no matter how much had been sent.
+        // statusCode 0 means no HTTP response at all. Only then, and only with
+        // nothing on the wire, is a resend safe. The byte count comes from the
+        // native side because the progress callback is optional.
         if (result.statusCode == 0 && result.bytesSent == 0 && attempt == 0) {
           logger.warning("Streaming upload $logContext failed before any data was sent, resending once");
           continue;
@@ -149,19 +139,15 @@ class UploadRepository {
           return UploadResult.cancelled();
         }
         if (bytesSent == 0 && attempt == 0) {
-          // An exception (Pigeon failure, platform error) means there is no
-          // StreamingUploadResult to read the real byte count from, so this falls
-          // back to whatever progress reported. When the caller did not subscribe to
-          // progress that is zero, which makes the resend optimistic -- but a
-          // transport that threw before returning a result almost always failed
-          // before the body was accepted, and the alternative is never retrying.
+          // No StreamingUploadResult to read the real byte count from, so this
+          // falls back to what progress reported -- zero when the caller did not
+          // subscribe. Almost always the body was never accepted.
           logger.warning("Streaming upload $logContext threw before any data was sent, resending once");
           continue;
         }
-        // Do NOT fall back to the Dart client here. The native path only falls back
-        // when the engine is missing (the provider returns null); an exception means
-        // the transfer broke, and retrying through package:cronet_http would buffer
-        // the whole file in memory -- the exact OOM this path exists to avoid.
+        // Do NOT fall back to the Dart client here. It only applies when the engine
+        // is missing; an exception means the transfer broke, and package:cronet_http
+        // would buffer the whole file -- the OOM this path exists to avoid.
         return UploadResult.error(errorMessage: 'Native streaming upload failed: $error');
       } finally {
         _streamingProgressListeners.remove(progressKey);
@@ -173,10 +159,8 @@ class UploadRepository {
   /// overwrite each other's progress.
   static final Map<String, void Function(int, int)> _streamingProgressListeners = {};
 
-  /// Salt per isolate. The native request tables live in the per-engine
-  /// [NetworkApiImpl], so a bare sequence number would not actually collide across
-  /// isolates; the salt is defensive, keeping keys distinct even if that ever
-  /// becomes a process-wide table again.
+  /// Salt per isolate, keeping keys distinct if the native request tables ever
+  /// become process-wide again.
   static final String _uploadKeySalt =
       math.Random().nextInt(0x7FFFFFFF).toRadixString(36);
   static int _streamingUploadSeq = 0;
@@ -203,9 +187,7 @@ class UploadRepository {
   }
 
   /// Turns a failed upload response into the same message the Dart path produces.
-  ///
-  /// Callers compare this string (the quota case stops the whole batch), so the
-  /// streaming and buffered paths must agree on the format.
+  /// Callers compare this string (the quota case stops the whole batch).
   static String _extractErrorMessage({required int statusCode, required String body}) {
     if (statusCode == 413) {
       return 'Error(413) File is too large to upload';
@@ -255,14 +237,11 @@ class UploadRepository {
       return UploadResult.cancelled();
     }
 
-    // package:cronet_http buffers the entire request body in memory before it
-    // hands it to the native layer (cronet_client.dart: `await stream.toBytes()`),
-    // which makes anything larger than the heap unuploadable. Hand big files to
-    // the native Cronet uploader, which streams them off disk instead.
+    // package:cronet_http buffers the entire body in memory before handing it to
+    // the native layer, so anything larger than the heap is unuploadable.
     //
-    // mTLS users stay on the buffered path: the native uploader talks to Cronet
-    // directly, and Cronet cannot present a client certificate, so handshake
-    // would fail. Their client is OkHttp, which streams the body itself.
+    // mTLS users stay on the buffered path: Cronet cannot present a client
+    // certificate. Their client is OkHttp, which streams the body itself.
     if (CurrentPlatform.isAndroid &&
         !NetworkRepository.usingMtls &&
         file.lengthSync() > kStreamingUploadThreshold) {

@@ -34,10 +34,9 @@ class UploadCallbacks {
   final void Function(String id, String errorMessage)? onError;
   final void Function(String id, double progress)? onICloudProgress;
 
-  /// Invoked when an upload was aborted before completing, either because the
-  /// cancel token was triggered or because the transport gave up. This is
-  /// distinct from [onError]: a cancelled upload still means the asset was not
-  /// backed up, so callers that gate retries on the failure count must count it.
+    /// Invoked when an upload was aborted before completing. Distinct from
+    /// [onError]: the asset was still not backed up, so callers gating retries on
+    /// the failure count must count it.
   final void Function(String id)? onCancelled;
 
   const UploadCallbacks({
@@ -103,9 +102,8 @@ class ForegroundUploadService {
   }) async {
     final candidates = await _backupRepository.getCandidates(userId);
     if (candidates.isEmpty) {
-      // Log it: returning silently made a run with nothing to upload
-      // indistinguishable from a run that uploaded everything successfully, so
-      // "0 uploads failed" told the caller nothing.
+        // Log it: returning silently made an empty run indistinguishable from a
+        // fully successful one.
       _logger.info('No backup candidates for $userId');
       return;
     }
@@ -369,12 +367,10 @@ class ForegroundUploadService {
         );
 
         if (livePhotoResult.isCancelled) {
-          // The pair is uploaded together; a cancelled video means the whole
-          // asset was cancelled, so uploading the still image here would create
-          // an orphan on the server. Returning is enough to skip it -- the loop
-          // already breaks on a completed cancel token, and setting the
-          // service-wide shouldAbortUpload here would abort unrelated runs that
-          // share this service instance.
+            // The pair uploads together; a cancelled video means the whole asset
+            // was cancelled, so the still image would become an orphan. Returning
+            // suffices -- setting shouldAbortUpload would abort unrelated runs
+            // sharing this service instance.
           callbacks.onCancelled?.call(asset.localId!);
           return;
         }

@@ -16,16 +16,9 @@ import java.util.concurrent.ExecutorService
 /**
  * Streams a single `multipart/form-data` upload straight from disk through Cronet.
  *
- * This exists because `package:cronet_http` materialises the whole request body in
- * Dart memory (`final body = await stream.toBytes()`) before handing it to the
- * native layer, and the JNI bridge then copies it twice more. Multi-gigabyte
- * videos therefore cannot be uploaded through that client at all: memory use
- * scales with file size and the process is killed part-way through.
- *
- * Cronet's own [UploadDataProvider] API is streaming, so driving it directly from
- * a file keeps memory flat regardless of payload size. Everything else — PQ
- * ClientHello, TLS, redirects, connection reuse — stays on the same engine the
- * rest of the app uses.
+ * `package:cronet_http` materialises the whole request body in memory before
+ * handing it to the native layer, so payloads larger than the heap cannot be
+ * uploaded through it. Cronet's own [UploadDataProvider] API is streaming.
  */
 internal class StreamingFileUploader(
   private val engine: CronetEngine,
@@ -52,13 +45,8 @@ internal class StreamingFileUploader(
   private val activeRequests = java.util.concurrent.ConcurrentHashMap<String, UrlRequest>()
 
   /**
-   * Keys cancelled before their request was registered. Dart can fire a cancel
-   * while the request is still being built; without a tombstone that signal is
-   * dropped and the upload runs to completion anyway.
-   *
-   * Safe from poisoning later attempts because progressKey is unique per attempt
-   * (see UploadRepository._uploadKeySalt); a stale entry belongs to a key that is
-   * never reused. The finally block of upload() clears each key once it arrives.
+   * Keys cancelled before their request was registered. Without a tombstone a
+   * cancel that arrives while the request is still being built is dropped.
    */
   private val cancelRequested = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -86,10 +74,9 @@ internal class StreamingFileUploader(
     progressKey: String,
   ): Outcome {
     if (!file.isFile) {
-      // A cancel can arrive between the Dart call and this point (the upload was
-      // queued, then cancelled, then the file vanished). The tombstone is added by
-      // cancel() before upload() runs, so it has to be cleared here -- this return
-      // happens before the try/finally that normally removes it.
+      // A cancel can arrive between the Dart call and this point. The tombstone is
+      // added by cancel() before upload() runs, so it must be cleared here -- this
+      // return precedes the try/finally that normally removes it.
       cancelRequested.remove(progressKey)
       return Outcome(false, 0, null, "File not found: ${file.path}")
     }
@@ -111,8 +98,7 @@ internal class StreamingFileUploader(
     val callback = object : UrlRequest.Callback() {
       override fun onRedirectReceived(request: UrlRequest, info: UrlResponseInfo, newLocationUrl: String) {
         // 301/302/303 rewrite POST to GET and drop the body, so following them
-        // would upload nothing and still report success on the landing page.
-        // Only 307/308 guarantee the method and body survive.
+        // would upload nothing. Only 307/308 preserve the method and body.
         val code = info.httpStatusCode
         if (code == 307 || code == 308) {
           request.followRedirect()
@@ -138,9 +124,8 @@ internal class StreamingFileUploader(
           val chunk = ByteArray(byteBuffer.remaining())
           byteBuffer.get(chunk)
           // A successful upload answers with a small JSON body; anything larger is
-          // an error page from a proxy or something equally unexpected. Cap what
-          // we keep so a huge response cannot exhaust the heap -- the status code
-          // is what matters at that point, not the body.
+          // an error page. Cap what is kept so a huge response cannot exhaust the
+          // heap.
           if (responseBytes.size() < MAX_RESPONSE_BYTES) {
             val room = MAX_RESPONSE_BYTES - responseBytes.size()
             responseBytes.write(chunk, 0, minOf(chunk.size, room))
@@ -219,15 +204,10 @@ internal class StreamingFileUploader(
         runCatching { builtRequest.cancel() }
       }
 
-      // A missing callback would otherwise wedge the calling thread forever.
-      // Plain latch.await() only bounds the total duration, so a transfer that
-      // stalls at 30% would sit here for the full timeout. Poll instead and give
-      // up once the body stops advancing.
-      //
-      // The cap scales with the file: a flat 30 minutes is generous for a 20 MB
-      // video and far too tight for a 5 GB one on a slow link, where it would
-      // fail an upload that was still making steady progress. The idle check
-      // above is the real stall detector; this only bounds runaway duration.
+      // A missing callback would wedge the calling thread forever. Poll rather
+      // than await(): a transfer stalled at 30% would otherwise sit here for the
+      // full timeout. The idle check is the real stall detector; the cap only
+      // bounds runaway duration and scales with the file.
       val hardDeadlineNanos = System.nanoTime() + uploadTimeoutSeconds(fileLength) * 1_000_000_000L
       var finished = false
       while (true) {
@@ -238,8 +218,7 @@ internal class StreamingFileUploader(
         val now = System.nanoTime()
         val idleMs = (now - provider.lastProgressAtNanos) / 1_000_000L
         // Only treat silence as a stall while body bytes are still owed. Once the
-        // whole body is on the wire the server may take a long time to reply, and
-        // killing the request there would fail uploads that were actually working.
+        // body is on the wire the server may take a long time to reply.
         val stalled = !provider.bodyComplete && idleMs > IDLE_TIMEOUT_MS
         if (now > hardDeadlineNanos || stalled) {
           runCatching { builtRequest.cancel() }
@@ -279,11 +258,9 @@ internal class StreamingFileUploader(
     fields.forEach { (name, value) ->
       out.append("--").append(boundary).append("\r\n")
       out.append("Content-Disposition: form-data; name=\"").append(name.escapeQuotes()).append("\"\r\n")
-      // Upstream's MultipartRequest adds these two headers when a field value
-      // contains non-ASCII bytes, because multipart parsers default to latin1 and
-      // would otherwise mangle the value. Today every field we send is ASCII
-      // (UUIDs, ISO timestamps, enum names), but the header set has to stay
-      // equivalent to the Dart path for anything added later.
+      // Multipart parsers default to latin1, so a non-ASCII field value needs this
+      // charset header or it would be mangled. The header set must stay equivalent
+      // to the Dart path.
       if (value.any { it.code > 127 }) {
         out.append("content-type: text/plain; charset=utf-8\r\n")
         out.append("content-transfer-encoding: binary\r\n")
@@ -302,14 +279,14 @@ internal class StreamingFileUploader(
     return out.toString().toByteArray(Charsets.UTF_8)
   }
 
-  // RFC 7578 §4.2: a quoted filename must not contain a bare CR or LF, or it
-  // can terminate the part header early. Percent-encode them along with quotes
-  // rather than relying on backslash escapes, which the RFC does not define.
+  // RFC 7578 §4.2: a quoted filename must not contain a bare CR or LF, or it can
+  // terminate the part header early. Percent-encode rather than rely on backslash
+  // escapes, which the RFC does not define.
   private fun String.escapeQuotes(): String = replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")
 
   /**
-   * Feeds header, file bytes, then footer to Cronet without ever holding more
-   * than one buffer worth of the payload in memory.
+   * Feeds header, file bytes, then footer to Cronet without holding more than one
+   * buffer of the payload in memory.
    */
   private class FileUploadProvider(
     private val file: File,
@@ -330,9 +307,8 @@ internal class StreamingFileUploader(
     /**
      * Body bytes handed to Cronet so far, for the caller's resend decision.
      *
-     * [maxReported] rather than [bytesSent]: rewind() resets the latter to zero, so
-     * a transfer that was rewound and then failed would otherwise look like it
-     * never sent anything.
+     * [maxReported] rather than [bytesSent]: rewind() resets the latter, so a
+     * rewound transfer would otherwise look like it sent nothing.
      */
     val sentBytes: Long get() = maxReported
     private var lastReported = 0L
@@ -347,26 +323,24 @@ internal class StreamingFileUploader(
 
     /**
      * True once every byte promised by [getLength] has been handed to Cronet.
-     * After that, no more reads arrive and [lastProgressAtNanos] freezes, so the
-     * caller must stop treating silence as a stall -- the server may legitimately
-     * spend a while processing a large body before answering.
+     * After that [lastProgressAtNanos] freezes, so silence must no longer count as
+     * a stall -- the server may still be processing a large body.
      */
     @Volatile var bodyComplete: Boolean = false
       private set
 
     /**
-     * Guards [stream] against the upload thread reading while the caller's
-     * finally block closes it after a timeout or cancel. FileInputStream is not
-     * safe for concurrent read/close.
+     * Guards [stream] against the upload thread reading while the caller closes it
+     * after a timeout or cancel. FileInputStream is not safe for concurrent
+     * read/close.
      */
     private val ioLock = Any()
 
     override fun getLength(): Long = totalLength
 
     override fun rewind(uploadDataSink: UploadDataSink) {
-      // Cronet blocks the request until the sink reports back. Returning without
-      // calling one of these leaves the stream parked in REWIND forever, so a
-      // redirected or retried upload would hang until the whole-request timeout.
+      // Cronet blocks the request until the sink reports back; returning without
+      // calling one leaves the stream parked in REWIND forever.
       val failure = try {
         openStream()
         null
@@ -447,10 +421,9 @@ internal class StreamingFileUploader(
         }
 
         if (wrote == 0) {
-          // Reaching here means the provider ran out of data before the byte count
-          // promised by getLength(). Reporting finalChunk=true is illegal for a
-          // non-chunked upload (Cronet throws), and silently succeeding would
-          // leave the server with a truncated body, so fail loudly instead.
+          // The provider ran out of data before the byte count promised by
+          // getLength(). finalChunk=true is illegal for a non-chunked upload, and
+          // succeeding silently would leave a truncated body on the server.
           sink.onReadError(
             IOException("Upload body exhausted at $bytesSent of $totalLength bytes"),
           )
@@ -472,9 +445,8 @@ internal class StreamingFileUploader(
 
     /**
      * Cronet throws IllegalStateException when the sink is no longer in the READ
-     * state (e.g. the request was cancelled mid-read). Letting that escape would
-     * kill the executor thread and strand the waiting caller forever, so swallow
-     * it -- the request already has a terminal outcome by then.
+     * state (request cancelled mid-read). Letting that escape would kill the
+     * executor thread and strand the waiting caller.
      */
     private fun reportReadError(sink: UploadDataSink, error: Exception) {
       runCatching { sink.onReadError(error) }
@@ -485,9 +457,8 @@ internal class StreamingFileUploader(
       // per 64 KiB buffer would flood the message loop on a large upload.
       if (bytesSent - lastReported >= PROGRESS_INTERVAL || bytesSent >= totalLength) {
         lastReported = bytesSent
-        // rewind() resets bytesSent to 0, so guard against reporting a number
-        // below what the UI has already shown -- otherwise a retried upload
-        // makes the progress bar jump backwards.
+        // rewind() resets bytesSent to 0, so never report below what the UI has
+        // already shown -- a retried upload would make the bar jump backwards.
         if (bytesSent > maxReported) {
           maxReported = bytesSent
           cb(bytesSent, totalLength)
@@ -520,9 +491,8 @@ internal class StreamingFileUploader(
     private const val BUFFER_SIZE = 256 * 1024
 
     /**
-     * Upper bound on the response body kept in memory. A successful upload replies
-     * with a small JSON object; this only guards against a proxy or server sending
-     * an enormous error page.
+     * Upper bound on the response body kept in memory, guarding against a proxy or
+     * server sending an enormous error page.
      */
     private const val MAX_RESPONSE_BYTES = 1024 * 1024
 
@@ -531,9 +501,8 @@ internal class StreamingFileUploader(
 
     /**
      * Assumed worst-case throughput used to size the cap, in bytes per second.
-     * Deliberately pessimistic (~0.5 Mbps): the cap exists to stop a runaway
-     * request, not to police slow links, and a false timeout on a healthy upload
-     * is worse than waiting longer.
+     * Deliberately pessimistic: a false timeout on a healthy upload is worse than
+     * waiting longer.
      */
     private const val ASSUMED_MIN_BYTES_PER_SECOND = 64L * 1024
 

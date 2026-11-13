@@ -52,10 +52,9 @@ class NetworkApiPlugin : FlutterPlugin, ActivityAware {
 private class NetworkApiImpl(private val context: Context) : NetworkApi {
   var activity: Activity? = null
 
-  // Cached per engine instance. HttpClientManager.rebuildCronetEngine() shuts
-  // the old engine down when the user clears the cache, and a uploader bound to
-  // that dead engine would fail every later upload with "Engine is shut down"
-  // for the rest of the process lifetime.
+    // Cached per engine instance: rebuildCronetEngine() shuts the old engine down,
+    // and an uploader bound to it would fail every later upload with "Engine is
+    // shut down".
   @Volatile private var uploaderEngine: CronetEngine? = null
   @Volatile private var uploaderRef: StreamingFileUploader? = null
 
@@ -137,9 +136,8 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
   }
 
   override fun cancelStreamingUpload(progressKey: String) {
-    // The uploader is created lazily on the first upload. Dropping the cancel when
-    // it does not exist yet loses the "cancelled while queued" signal and the
-    // transfer then runs to completion.
+      // Created lazily on the first upload. Dropping the cancel when it does not
+      // exist yet loses the "cancelled while queued" signal.
     (uploaderRef ?: currentUploader())?.cancel(progressKey)
   }
 
@@ -180,17 +178,15 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
         )
       } catch (t: Throwable) {
         // Catch Throwable, not Exception: an Error (e.g. OOM while sizing a
-        // buffer) would otherwise kill this thread before the callback fires,
-        // leaving the Dart Future pending forever.
+        // buffer) would kill this thread before the callback fires, leaving the
+        // Dart Future pending forever.
         StreamingFileUploader.Outcome(false, 0, null, t.toString())
       }
       // Pigeon replies must go out on the platform thread; this runs on the
       // upload thread.
       mainHandler.post {
-        // The engine can be destroyed while the upload is in flight (background
-        // worker finishing, activity torn down). Replying on a dead
-        // BinaryMessenger throws, and an exception on the main looper crashes the
-        // process -- which would turn a completed upload into a crash.
+          // The engine can be destroyed while the upload is in flight. Replying on
+          // a dead BinaryMessenger throws, and that crashes the process.
         runCatching {
           callback(
             Result.success(
