@@ -12,16 +12,38 @@ class NetworkRepository {
   static http.Client? _client;
   static Pointer<Void>? _clientPointer;
 
+  /// Whether the current client was built for mutual TLS. Tracked separately from
+  /// [_clientPointer] because installing or removing a client certificate keeps
+  /// the pointer the same but changes which transport can actually connect.
+  static bool _usingMtls = false;
+
   static Future<void> init() async {
     final clientPointer = Pointer<Void>.fromAddress(await networkApi.getClientPointer());
-    if (clientPointer == _clientPointer) {
+    // A client certificate changes which transport is usable, so it has to be part
+    // of the "nothing to do" check -- otherwise installing one after init() leaves
+    // the Cronet client in place and every request fails the TLS handshake.
+    final mtls = Platform.isIOS ? false : await networkApi.hasCertificate();
+    if (clientPointer == _clientPointer && mtls == _usingMtls) {
       return;
     }
     _clientPointer = clientPointer;
+    _usingMtls = mtls;
     _client?.close();
     if (Platform.isIOS) {
       final session = URLSession.fromRawPointer(clientPointer.cast());
       _client = CupertinoClient.fromSharedSession(session);
+    } else if (mtls) {
+      // Cronet cannot be given a client certificate (see HttpClientManager's image
+      // loader, which falls back to OkHttp for the same reason), so mTLS users stay
+      // on the native OkHttp client with its configured timeouts.
+      _client = OkHttpClient.fromJniGlobalRef(
+        clientPointer,
+        configuration: const OkHttpClientConfiguration(
+          connectTimeout: Duration(seconds: 30),
+          readTimeout: Duration(seconds: 60),
+          writeTimeout: Duration(seconds: 60),
+        ),
+      );
     } else {
       _client = _CronetAuthClient(await _buildCronetClient());
     }
@@ -56,17 +78,22 @@ class NetworkRepository {
     }
   }
 
-  /// Clears both copies of the session cookies: the native persistent jar and the
-  /// in-process jar inside [_CronetAuthClient].
+  /// Clears the session cookies.
   ///
-  /// Call this on logout instead of `networkApi.clearCookies()` -- the latter only
-  /// touches the native jar, and the Dart jar would then re-send the old access
-  /// token on the next request to the same host.
+  /// The native persistent jar is cleared directly. The Cronet engine keeps its own
+  /// cookie store and exposes no API to clear it, so the client is dropped and
+  /// rebuilt on next use instead -- otherwise the old access token would keep being
+  /// attached to requests after the user signed out.
   static Future<void> clearCookies() async {
     await networkApi.clearCookies();
-    final current = _client;
-    if (current is _CronetAuthClient) {
-      current.clearCookieJar();
+    if (Platform.isAndroid && !_usingMtls) {
+      // Drop the engine (its cookie store cannot be cleared through the API) and
+      // rebuild it immediately: callers read [client] right after logout, so
+      // leaving it null here would crash them.
+      final pointer = _clientPointer;
+      _client?.close();
+      _client = _CronetAuthClient(await _buildCronetClient());
+      _clientPointer = pointer;
     }
   }
 
@@ -79,91 +106,24 @@ class NetworkRepository {
   static http.Client get client => _client!;
 }
 
+/// Attaches the headers the native client would have attached.
+///
+/// Cronet cannot be given OkHttp-style interceptors, so the auth headers have to be
+/// copied onto each request. Cookie lifetime is left to the Cronet engine's own
+/// store: the native jar is the single source of truth (it parses Set-Cookie per
+/// RFC 6265 and syncs cookies across server URLs), and re-implementing that here
+/// produced a weaker second copy that could disagree with it.
 class _CronetAuthClient extends http.BaseClient {
   _CronetAuthClient(this._inner);
 
   final http.Client _inner;
 
-  final Map<String, Map<String, _JarCookie>> _cookies = {};
-
-  /// Drops the whole jar. Logout must call this: the native jar is not the only
-  /// copy of the session cookies, and leaving this one populated means the old
-  /// access token is sent again on the next request to the same host -- after
-  /// the user has signed out.
-  void clearCookieJar() => _cookies.clear();
-
-  String? _cookieHeader(String host, {required bool isHttps, required String path}) {
-    final jar = _cookies[host];
-    if (jar == null || jar.isEmpty) return null;
-    jar.removeWhere((_, cookie) => cookie.isExpired);
-    final parts = <String>[];
-    for (final entry in jar.entries) {
-      final cookie = entry.value;
-      // A Secure cookie must not travel over plain HTTP: the access token is a
-      // bearer credential, and Immich supports http:// LAN endpoints.
-      if (cookie.secure && !isHttps) continue;
-      if (!path.startsWith(cookie.path)) continue;
-      parts.add('${entry.key}=${cookie.value}');
-    }
-    return parts.isEmpty ? null : parts.join('; ');
-  }
-
-  void _storeCookies(String host, List<String> setCookieHeaders) {
-    final raws = <String>[];
-    for (final line in setCookieHeaders) {
-      final parts = line.split(RegExp(r',\s*(?=[A-Za-z0-9!#$%&*+.^_`|~-]+=)'));
-      raws.addAll(parts);
-    }
-
-    for (final raw in raws) {
-      final segments = raw.split(';');
-      final eq = segments.first.indexOf('=');
-      if (eq <= 0) continue;
-      final name = segments.first.substring(0, eq).trim();
-      final value = segments.first.substring(eq + 1).trim();
-      if (name.isEmpty) continue;
-
-      var path = '/';
-      var secure = false;
-      DateTime? expiresAt;
-      for (final attribute in segments.skip(1)) {
-        final i = attribute.indexOf('=');
-        final key = (i < 0 ? attribute : attribute.substring(0, i)).trim().toLowerCase();
-        final rawValue = i < 0 ? '' : attribute.substring(i + 1).trim();
-        switch (key) {
-          case 'path':
-            if (rawValue.startsWith('/')) path = rawValue;
-            break;
-          case 'secure':
-            secure = true;
-            break;
-          case 'max-age':
-            final seconds = int.tryParse(rawValue);
-            if (seconds != null) expiresAt = DateTime.now().add(Duration(seconds: seconds));
-            break;
-          case 'expires':
-            final parsed = _tryParseHttpDate(rawValue);
-            if (parsed != null) expiresAt = parsed;
-            break;
-        }
-      }
-
-      final jar = _cookies.putIfAbsent(host, () => {});
-      final expired = expiresAt != null && !expiresAt.isAfter(DateTime.now());
-      if (value.isEmpty || expired) {
-        jar.remove(name);
-      } else {
-        jar[name] = _JarCookie(value, path: path, secure: secure, expiresAt: expiresAt);
-      }
-    }
-  }
-
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    final host = request.url.host;
-    final isHttps = request.url.scheme == 'https';
-    final path = request.url.path.isEmpty ? '/' : request.url.path;
-
+    // The native client owns header construction: it knows the persisted headers,
+    // the cookie jar (parsed per RFC 6265, synced across server URLs) and any Basic
+    // credentials embedded in the URL. Copy its answer onto the request instead of
+    // reconstructing it here.
     final headers = await networkApi.requestAuthHeaders(request.url.toString());
     headers.forEach((k, v) {
       if (!request.headers.containsKey(k)) {
@@ -171,57 +131,16 @@ class _CronetAuthClient extends http.BaseClient {
       }
     });
 
-    final cookie = _cookieHeader(host, isHttps: isHttps, path: path);
-    if (cookie != null && !request.headers.containsKey('cookie')) {
-      request.headers['cookie'] = cookie;
-    }
-
     // Cronet follows redirects by replaying the same UrlRequest, so the Cookie and
     // Authorization headers set above would travel to the redirect target too --
     // OkHttp strips them on a host change, Cronet does not. This is not disabled
     // here because Immich deployments commonly rely on a same-origin 301/302
     // (http -> https at a reverse proxy), and breaking that would be worse than
     // the exposure. Cross-host redirects are the caller's responsibility.
-    final response = await _inner.send(request);
-
-    final setCookies = response.headers.entries
-        .where((e) => e.key.toLowerCase() == 'set-cookie')
-        .map((e) => e.value)
-        .toList();
-    if (setCookies.isNotEmpty) {
-      _storeCookies(host, setCookies);
-    }
-
-    return response;
+    return _inner.send(request);
   }
 
   @override
   void close() => _inner.close();
 }
 
-/// One entry in the Dart-side cookie jar.
-///
-/// Only the attributes that change how a cookie is *sent* are kept. Domain is
-/// deliberately absent: this jar is keyed by the exact request host, matching how
-/// the calls above look it up, and pretending to support cross-subdomain sharing
-/// without an eTLD+1 computation would be worse than not supporting it.
-class _JarCookie {
-  const _JarCookie(this.value, {required this.path, required this.secure, this.expiresAt});
-
-  final String value;
-  final String path;
-  final bool secure;
-  final DateTime? expiresAt;
-
-  bool get isExpired => expiresAt != null && !expiresAt!.isAfter(DateTime.now());
-}
-
-/// Parses the three date formats HTTP allows. Returns null when the value is not
-/// a date, so an unparseable Expires simply leaves the cookie non-expiring.
-DateTime? _tryParseHttpDate(String value) {
-  try {
-    return HttpDate.parse(value);
-  } catch (_) {
-    return null;
-  }
-}

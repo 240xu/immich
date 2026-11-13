@@ -26,6 +26,18 @@ class BackgroundWorkerApiImpl: BackgroundWorkerFgHostApi {
     return BackgroundWorkerApiImpl.launchedInBackground
   }
 
+  /// Asks iOS to run the upload worker as soon as it will allow.
+  ///
+  /// Android can start the worker immediately; BGTaskScheduler only accepts a
+  /// request and decides when to honour it, so this re-submits both tasks with an
+  /// earliest start date of now. Toggling the setting on calls this after
+  /// enable(), matching the Android flow without promising instant execution.
+  func runNow() throws {
+    BackgroundWorkerApiImpl.scheduleRefreshWorker()
+    BackgroundWorkerApiImpl.scheduleProcessingWorker()
+    print("BackgroundWorkerApiImpl:runNow Requested an immediate background run")
+  }
+
   // Stays false until iOS runs one of the background tasks
   private static var launchedInBackground = false
   private static let taskIDs = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as! [String]

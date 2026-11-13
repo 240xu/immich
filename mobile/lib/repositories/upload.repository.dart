@@ -116,8 +116,11 @@ class UploadRepository {
         return UploadResult.cancelled();
       }
 
-      final message = result.errorMessage ??
-          (result.body?.isNotEmpty == true ? result.body : 'Upload failed with status ${result.statusCode}');
+      // Mirror the Dart path's error extraction so both routes report the same
+      // text. Callers match on the message ("Quota has been exceeded!" stops the
+      // whole batch), so handing them the raw JSON body would break that.
+      final body = result.body ?? '';
+      final message = _extractErrorMessage(statusCode: result.statusCode, body: body);
       logger.warning("Streaming upload $logContext failed: $message");
       return UploadResult.error(statusCode: result.statusCode, errorMessage: message);
     } catch (error, stackTrace) {
@@ -168,6 +171,26 @@ class UploadRepository {
       'avi' => 'video/x-msvideo',
       _ => 'application/octet-stream',
     };
+  }
+
+  /// Turns a failed upload response into the same message the Dart path produces.
+  ///
+  /// Callers compare this string (the quota case stops the whole batch), so the
+  /// streaming and buffered paths must agree on the format.
+  static String _extractErrorMessage({required int statusCode, required String body}) {
+    if (statusCode == 413) {
+      return 'Error(413) File is too large to upload';
+    }
+    try {
+      final decoded = jsonDecode(body);
+      final message = decoded is Map ? (decoded['message'] ?? decoded['error']) : null;
+      if (message is String && message.isNotEmpty) {
+        return message;
+      }
+    } catch (_) {
+      // Not JSON; fall through to the raw body.
+    }
+    return body.isNotEmpty ? body : 'Upload failed with status $statusCode';
   }
 
   Future<void> deleteDatabaseRecords(String group) {

@@ -306,20 +306,26 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       final uploadService = _ref?.read(foregroundUploadServiceProvider);
       var failed = 0;
+      var cancelled = 0;
       await uploadService?.uploadCandidates(
         currentUser.id,
         _cancellationToken,
         callbacks: UploadCallbacks(
           onError: (_, _) => failed++,
-          // A cancelled upload never reached the server, so it must count as a
-          // failure. Without this the run reports "0 uploads failed" and the
-          // worker returns success, silently dropping the remaining assets.
-          onCancelled: (_) => failed++,
+          // Tracked separately from failures: a cancel means the run was stopped
+          // (timeout, user stop, app going idle), so it must not turn into a
+          // retry. Counting it as a failure made the worker immediately enqueue
+          // another run, and that run would be cancelled again.
+          onCancelled: (_) => cancelled++,
         ),
         useSequentialUpload: true,
       );
-      _logger.info("Background backup finished, $failed uploads failed");
-      // Retry when at least one upload failed
+      _logger.info("Background backup finished, $failed uploads failed, $cancelled cancelled");
+      // A cancellation is not a reason to retry -- whatever cancelled this run
+      // will cancel the next one too.
+      if (cancelled > 0 && failed == 0) {
+        return false;
+      }
       return failed > 0;
     }, (error, stack) => dPrint(() => "Error in backup zone $error, $stack"));
     return needsRetry ?? true;
@@ -356,12 +362,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       return isSuccess;
     }
 
-    // Hashing a batch we are not going to upload burns minutes of CPU/battery for
-    // nothing; the caller retries the whole run anyway.
-    if (!isSuccess) {
-      return false;
-    }
-
+    // Hash regardless of isSuccess, matching upstream: hashing is local work and
+    // its result is needed by later runs, so skipping it on a failed sync only
+    // defers the cost. (The 2-minute timeout above is the only added bound.)
     var hashFuture = _hashService.hashAssets();
     if (hashTimeout != null) {
       hashFuture = hashFuture.timeout(

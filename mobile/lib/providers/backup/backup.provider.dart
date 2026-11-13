@@ -218,6 +218,11 @@ class BackupNotifier extends StateNotifier<BackupState> {
         if (identical(_cancelToken, cancelToken)) {
           _cancelToken = null;
         }
+        // Upstream relied on that "restarting" branch to clear the per-run UI
+        // state, so clearing the token alone would carry the finished run's
+        // failed rows and stale speed samples into the next one.
+        _uploadSpeedManager.clear();
+        state = state.copyWith(uploadItems: {}, iCloudDownloadProgress: {});
       }
       if (!runGuard.isCompleted) {
         runGuard.complete();
