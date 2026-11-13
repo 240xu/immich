@@ -157,7 +157,8 @@ class NetworkApiImpl: NetworkApi {
           isSuccess: false,
           statusCode: 0,
           body: nil,
-          errorMessage: "Streaming upload is only implemented on Android"
+          errorMessage: "Streaming upload is only implemented on Android",
+          bytesSent: 0
         )
       )
     )

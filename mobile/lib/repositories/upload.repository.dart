@@ -128,7 +128,10 @@ class UploadRepository {
 
         // statusCode 0 means no HTTP response at all (connection died, engine
         // gone). Only then, and only with nothing on the wire, is a resend safe.
-        if (result.statusCode == 0 && bytesSent == 0 && attempt == 0) {
+        // The byte count comes from the native side rather than the progress
+        // callback: progress is optional, so a caller that does not subscribe would
+        // report zero bytes no matter how much had been sent.
+        if (result.statusCode == 0 && result.bytesSent == 0 && attempt == 0) {
           logger.warning("Streaming upload $logContext failed before any data was sent, resending once");
           continue;
         }
@@ -146,6 +149,12 @@ class UploadRepository {
           return UploadResult.cancelled();
         }
         if (bytesSent == 0 && attempt == 0) {
+          // An exception (Pigeon failure, platform error) means there is no
+          // StreamingUploadResult to read the real byte count from, so this falls
+          // back to whatever progress reported. When the caller did not subscribe to
+          // progress that is zero, which makes the resend optimistic -- but a
+          // transport that threw before returning a result almost always failed
+          // before the body was accepted, and the alternative is never retrying.
           logger.warning("Streaming upload $logContext threw before any data was sent, resending once");
           continue;
         }

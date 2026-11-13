@@ -23,7 +23,16 @@ class StreamingUploadResult {
   String? body;
   String? errorMessage;
 
-  StreamingUploadResult(this.isSuccess, this.statusCode, this.body, this.errorMessage);
+  /// How many body bytes actually reached the wire before the request ended.
+  ///
+  /// The Dart side uses this to decide whether a failed transfer may be resent:
+  /// once bytes are on the wire the server may already have written part of the
+  /// asset, so a resend could duplicate it. Progress callbacks cannot be used for
+  /// this because they are optional and a caller that does not subscribe would
+  /// see zero bytes no matter how much was sent.
+  int bytesSent;
+
+  StreamingUploadResult(this.isSuccess, this.statusCode, this.body, this.errorMessage, this.bytesSent);
 }
 
 /// Reports upload progress from the native streaming upload back to Dart.

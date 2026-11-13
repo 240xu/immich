@@ -38,7 +38,11 @@ internal class StreamingFileUploader(
     val statusCode: Int,
     val body: String?,
     val errorMessage: String?,
-  )
+    /** Body bytes handed to Cronet, used by Dart to decide whether a resend is safe. */
+    val bytesSent: Long = 0,
+  ) {
+    fun withSentBytes(sent: Long): Outcome = if (bytesSent == sent) this else copy(bytesSent = sent)
+  }
 
   /**
    * Live requests keyed by progress key, so Dart can abort an upload when the
@@ -244,18 +248,18 @@ internal class StreamingFileUploader(
         }
       }
       if (!finished) {
-        outcome?.let { return it }
+        outcome?.let { return it.withSentBytes(provider.sentBytes) }
         val why = if (provider.bodyComplete) {
           "Upload timed out waiting for the server response"
         } else {
           val idleSeconds = (System.nanoTime() - provider.lastProgressAtNanos) / 1_000_000_000L
           "Upload stalled: no body progress for ${idleSeconds}s"
         }
-        return Outcome(false, 0, null, why)
+        return Outcome(false, 0, null, why).withSentBytes(provider.sentBytes)
       }
-      outcome ?: Outcome(false, 0, null, "Upload finished with no result")
+      (outcome ?: Outcome(false, 0, null, "Upload finished with no result")).withSentBytes(provider.sentBytes)
     } catch (e: Exception) {
-      Outcome(false, 0, null, e.toString())
+      Outcome(false, 0, null, e.toString()).withSentBytes(provider.sentBytes)
     } finally {
       // Remove by identity so a retry that reuses the key keeps its own entry.
       request?.let { activeRequests.remove(progressKey, it) }
@@ -322,6 +326,15 @@ internal class StreamingFileUploader(
     private var fileRemaining = 0L
     private var footerRemaining = 0
     private var bytesSent = 0L
+
+    /**
+     * Body bytes handed to Cronet so far, for the caller's resend decision.
+     *
+     * [maxReported] rather than [bytesSent]: rewind() resets the latter to zero, so
+     * a transfer that was rewound and then failed would otherwise look like it
+     * never sent anything.
+     */
+    val sentBytes: Long get() = maxReported
     private var lastReported = 0L
 
     /** Highest value ever handed to onProgress; survives rewind(). */

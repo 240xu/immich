@@ -155,7 +155,7 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
   ) {
     val uploader = currentUploader()
     if (uploader == null) {
-      callback(Result.success(StreamingUploadResult(false, 0, null, "Cronet engine unavailable")))
+      callback(Result.success(StreamingUploadResult(false, 0, null, "Cronet engine unavailable", 0)))
       return
     }
 
@@ -200,6 +200,7 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
                 outcome.statusCode.toLong(),
                 outcome.body,
                 outcome.errorMessage,
+                outcome.bytesSent,
               ),
             ),
           )
