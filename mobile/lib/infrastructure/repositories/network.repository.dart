@@ -163,4 +163,3 @@ class _CronetAuthClient extends http.BaseClient {
   @override
   void close() => _inner.close();
 }
-
