@@ -288,7 +288,6 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       _ref?.dispose();
       _ref = null;
-
     } catch (error, stack) {
       dPrint(() => 'Failed to cleanup background worker: $error with stack: $stack');
     }
