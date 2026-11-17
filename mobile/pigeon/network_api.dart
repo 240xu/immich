@@ -48,4 +48,9 @@ abstract class NetworkApi {
   void clearCookies();
 
   String getAppGroupId();
+
+  /// Headers the native client would attach to [url]: the user-configured headers
+  /// plus the session cookies for that host. dart:io cannot read them, so the
+  /// websocket asks the native client instead of rebuilding them.
+  Map<String, String> requestAuthHeaders(String url);
 }
