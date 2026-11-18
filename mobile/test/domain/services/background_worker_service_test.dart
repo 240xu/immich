@@ -138,6 +138,85 @@ void main() {
     });
   });
 
+  group('onAndroidUpload budget', () {
+    // 预算到点是我们自己喊停的，不是用户手动停止。若报 false，Kotlin 侧会
+    // complete(Result.success())，即「干完了、别重排」，用户观感是「传一会儿
+    // 就停，得反复开 App 推它」。这两条用例把这个语义钉住。
+    test('asks WorkManager to reschedule when it runs out of budget', () {
+      fakeAsync((async) {
+        when(() => mockRemoteSyncService.sync()).thenAnswer((_) async => true);
+        final uploadService = MockForegroundUploadService();
+        // 上传一直挂着，模拟还没传完就被预算掐断
+        when(
+          () => uploadService.uploadCandidates(
+            any(),
+            any(),
+            callbacks: any(named: 'callbacks'),
+            useSequentialUpload: any(named: 'useSequentialUpload'),
+          ),
+        ).thenAnswer((_) => Completer<void>().future);
+
+        sut = BackgroundWorkerBgService(
+          dataController: MockDataController(),
+          apiService: MockApiService(),
+          overrides: [
+            localSyncServiceProvider.overrideWithValue(MockLocalSyncService()),
+            syncStreamServiceProvider.overrideWithValue(mockRemoteSyncService),
+            hashServiceProvider.overrideWithValue(MockHashService()),
+            currentUserProvider.overrideWith((ref) => CurrentUserProvider(MockUserService())),
+            foregroundUploadServiceProvider.overrideWithValue(uploadService),
+            backgroundUploadServiceProvider.overrideWithValue(mockBackgroundUploadService),
+          ],
+        );
+
+        bool? needsRetry;
+        unawaited(sut.onAndroidUpload(20).then((value) => needsRetry = value));
+
+        // maxMinutes=20 => backupTimeout = 19 分钟
+        async.elapse(const Duration(minutes: 20, seconds: 5));
+        async.flushMicrotasks();
+
+        expect(needsRetry, isTrue, reason: '预算超时后必须要求重排');
+      });
+    });
+
+    test('does not retry when the user cancels', () async {
+      when(() => mockRemoteSyncService.sync()).thenAnswer((_) async => true);
+      final uploadService = MockForegroundUploadService();
+      final cancelToken = Completer<void>();
+      when(
+        () => uploadService.uploadCandidates(
+          any(),
+          any(),
+          callbacks: any(named: 'callbacks'),
+          useSequentialUpload: any(named: 'useSequentialUpload'),
+        ),
+      ).thenAnswer((invocation) async {
+        final callbacks = invocation.namedArguments[#callbacks] as UploadCallbacks;
+        // 模拟「用户手动停止 / 系统回收」导致的取消，而不是预算超时
+        callbacks.onCancelled?.call('asset-1');
+        cancelToken.complete();
+      });
+
+      sut = BackgroundWorkerBgService(
+        dataController: MockDataController(),
+        apiService: MockApiService(),
+        overrides: [
+          localSyncServiceProvider.overrideWithValue(MockLocalSyncService()),
+          syncStreamServiceProvider.overrideWithValue(mockRemoteSyncService),
+          hashServiceProvider.overrideWithValue(MockHashService()),
+          currentUserProvider.overrideWith((ref) => CurrentUserProvider(MockUserService())),
+          foregroundUploadServiceProvider.overrideWithValue(uploadService),
+          backgroundUploadServiceProvider.overrideWithValue(mockBackgroundUploadService),
+        ],
+      );
+
+      final needsRetry = await sut.onAndroidUpload(20);
+
+      expect(needsRetry, isFalse, reason: '用户取消不该触发重排');
+    });
+  });
+
   group('background sync switch', () {
     tearDown(() async {
       await SettingsRepository.instance.write(SettingsKey.backgroundSync, true);
