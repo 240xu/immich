@@ -87,6 +87,14 @@ class URLSessionManager: NSObject {
     syncAuthCookies()
   }
 
+  static func clearCookies() {
+    cookieQueue.sync {
+      for cookie in cookieStorage.cookies ?? [] {
+        cookieStorage.deleteCookie(cookie)
+      }
+    }
+  }
+
   @objc private static func cookiesDidChange(_ notification: Notification) {
     guard !isSyncing, !serverUrls.isEmpty else { return }
     syncAuthCookies()
