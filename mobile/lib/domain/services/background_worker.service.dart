@@ -10,6 +10,7 @@ import 'package:immich_mobile/data/store.dart';
 import 'package:immich_mobile/domain/services/hash.service.dart';
 import 'package:immich_mobile/domain/services/local_sync.service.dart';
 import 'package:immich_mobile/domain/services/log.service.dart';
+import 'package:immich_mobile/domain/services/sync_linked_album.service.dart';
 import 'package:immich_mobile/domain/services/sync_stream.service.dart';
 // ignore: library_prefixes
 import 'package:immich_mobile/entities/store.entity.dart' as dbStore;
@@ -225,16 +226,28 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       final backupFuture = _handleBackup(remoteSync: Future.value(true));
       Timer? cancelTimer;
+      // 预算超时是我们自己喊停的，语义上和「用户手动停止 / 系统回收」不同：
+      // 前者说明还有活没干完，应让 WorkManager 重排；后者重排只会再被杀一次。
+      var timedOut = false;
       if (backupTimeout != null) {
         cancelTimer = Timer(backupTimeout, () {
           if (!_cancellationToken.isCompleted) {
+            timedOut = true;
             _logger.warning("$debugLabel timed out after ${backupTimeout.inMinutes}m, cancelling backup");
             _cancellationToken.complete();
           }
         });
       }
       try {
-        return await backupFuture;
+        final needsRetry = await backupFuture;
+        // 预算到点被我们喊停时，本轮几乎必然还有待传文件：
+        // 报 false 会让 Kotlin 侧 complete(Result.success())，即「干完了」，
+        // 下次要等周期任务或用户开 App 才继续，观感就是「传一会儿就停」。
+        if (timedOut) {
+          _logger.info("$debugLabel hit its budget, asking WorkManager to reschedule");
+          return true;
+        }
+        return needsRetry;
       } finally {
         cancelTimer?.cancel();
       }
@@ -338,10 +351,21 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       final uploadService = _ref?.read(foregroundUploadServiceProvider);
       var failed = 0;
       var cancelled = 0;
+      // 每 10 个上传成功就补一次同步相册（见 _syncLinkedAlbums 注释）
+      var uploaded = 0;
+      Future<void>? albumSync;
       await uploadService?.uploadCandidates(
         currentUser.id,
         _cancellationToken,
         callbacks: UploadCallbacks(
+          onSuccess: (_, _) {
+            uploaded += 1;
+            // 同时只跑一个相册同步，避免和上传抢资源
+            if (uploaded >= 10 && albumSync == null) {
+              uploaded = 0;
+              albumSync = _syncLinkedAlbums(currentUser.id).whenComplete(() => albumSync = null);
+            }
+          },
           onError: (_, _) => failed++,
           // Tracked separately from failures: a cancel means the run was stopped
           // (timeout, user stop, app idle), so it must not turn into a retry.
@@ -349,6 +373,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         ),
         useSequentialUpload: true,
       );
+      await albumSync;
+      // 收尾：把不满 10 个的尾巴补进去
+      await _syncLinkedAlbums(currentUser.id);
       _logger.info("Background backup finished, $failed uploads failed, $cancelled cancelled");
       // A cancellation is not a reason to retry -- whatever cancelled this run
       // will cancel the next one too.
@@ -358,6 +385,42 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       return failed > 0;
     }, (error, stack) => dPrint(() => "Error in backup zone $error, $stack"));
     return needsRetry ?? true;
+  }
+
+  /// 把本轮后台上传的资产补进「同步相册」。
+  ///
+  /// 上游 PR #33162（2026-11-18）为 iOS 加了这个，Android 侧当时还没有。
+  /// 不补的话观感是：后台传完 500 张，别人在网页/另一台设备上看时间线有、
+  /// 但「相册」里没有，要等机主本人打开一次 App 才会补进去。
+  ///
+  /// 与上游语义保持一致：每 10 个上传补一次（避免本轮被系统中途杀掉时
+  /// 已传完的那批漏出相册），本轮结束再补一次收尾。
+  Future<void> _syncLinkedAlbums(String userId) async {
+    if (_cancellationToken.isCompleted || _isCleanedUp) {
+      return;
+    }
+    // 直接用设置值（FgService 的 _isBackgroundSyncEnabled 是另一个类的私有成员）
+    final config = SettingsRepository.instance.appConfig.backup;
+    if (!config.backgroundSync || !config.syncAlbums) {
+      return;
+    }
+
+    final ref = _ref;
+    if (ref == null) {
+      return;
+    }
+
+    try {
+      // 复用上游为后台场景写好的工具：它从 Store 取当前用户，
+      // 并用 cancellationProvider（本容器已 override 成 _cancellationToken）联动取消。
+      await ref.read(syncLinkedAlbumServiceProvider).syncLinkedAlbums(
+        userId,
+        cancellation: ref.read(cancellationProvider),
+      );
+    } catch (error, stack) {
+      // 相册同步失败不该影响上传本身的结果判定
+      _logger.warning("Failed to sync linked albums", error, stack);
+    }
   }
 
   Future<bool> _syncAssets({Duration? hashTimeout}) async {
