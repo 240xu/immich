@@ -345,6 +345,8 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       if (CurrentPlatform.isIOS) {
         await _ref?.read(backupProvider.notifier).startBackupWithURLSession(currentUser.id, remoteSync);
+        await remoteSync;
+        await _syncLinkedAlbums(currentUser.id);
         return false;
       }
 
@@ -352,17 +354,17 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       var failed = 0;
       var cancelled = 0;
       // 每 10 个上传成功就补一次同步相册（见 _syncLinkedAlbums 注释）
-      var uploaded = 0;
+      var unlinked = 0;
       Future<void>? albumSync;
       await uploadService?.uploadCandidates(
         currentUser.id,
         _cancellationToken,
         callbacks: UploadCallbacks(
           onSuccess: (_, _) {
-            uploaded += 1;
+            unlinked += 1;
             // 同时只跑一个相册同步，避免和上传抢资源
-            if (uploaded >= 10 && albumSync == null) {
-              uploaded = 0;
+            if (unlinked >= 10 && albumSync == null) {
+              unlinked = 0;
               albumSync = _syncLinkedAlbums(currentUser.id).whenComplete(() => albumSync = null);
             }
           },
@@ -389,33 +391,25 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   /// 把本轮后台上传的资产补进「同步相册」。
   ///
-  /// 上游 PR #33162（2026-11-18）为 iOS 加了这个，Android 侧当时还没有。
+  /// 上游 PR #33162（2026-11-18）：每 10 个上传补一次，本轮结束再补一次。
   /// 不补的话观感是：后台传完 500 张，别人在网页/另一台设备上看时间线有、
   /// 但「相册」里没有，要等机主本人打开一次 App 才会补进去。
-  ///
-  /// 与上游语义保持一致：每 10 个上传补一次（避免本轮被系统中途杀掉时
-  /// 已传完的那批漏出相册），本轮结束再补一次收尾。
   Future<void> _syncLinkedAlbums(String userId) async {
     if (_cancellationToken.isCompleted || _isCleanedUp) {
       return;
     }
-    // 直接用设置值（FgService 的 _isBackgroundSyncEnabled 是另一个类的私有成员）
+    // 直接读设置：FgService 的 _isBackgroundSyncEnabled 是另一个类的私有成员
     final config = SettingsRepository.instance.appConfig.backup;
     if (!config.backgroundSync || !config.syncAlbums) {
       return;
     }
 
-    final ref = _ref;
-    if (ref == null) {
-      return;
-    }
-
     try {
-      // 复用上游为后台场景写好的工具：它从 Store 取当前用户，
-      // 并用 cancellationProvider（本容器已 override 成 _cancellationToken）联动取消。
-      await ref.read(syncLinkedAlbumServiceProvider).syncLinkedAlbums(
+      // 先把远端相册状态同步下来，再用它决定哪些资产要补进相册
+      await _remoteSyncService.sync();
+      await _ref?.read(syncLinkedAlbumServiceProvider).syncLinkedAlbums(
         userId,
-        cancellation: ref.read(cancellationProvider),
+        cancellation: _cancellationToken,
       );
     } catch (error, stack) {
       // 相册同步失败不该影响上传本身的结果判定
