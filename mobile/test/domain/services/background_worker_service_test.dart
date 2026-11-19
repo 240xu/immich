@@ -267,6 +267,12 @@ void main() {
   });
 
   group('onAndroidUpload budget', () {
+    // 这个组测的是 Android 分支（_handleBackup 在 iOS 上会走
+    // startBackupWithURLSession 直接返回 false，根本不会用到上传回调），
+    // 而 setUpAll 把默认平台设成了 iOS，必须在本组内覆盖回来。
+    setUp(() => debugDefaultTargetPlatformOverride = TargetPlatform.android);
+    tearDown(() => debugDefaultTargetPlatformOverride = TargetPlatform.iOS);
+
     // 预算到点是我们自己喊停的，不是用户手动停止。若报 false，Kotlin 侧会
     // complete(Result.success())，即「干完了、别重排」，用户观感是「传一会儿
     // 就停，得反复开 App 推它」。这两条用例把这个语义钉住。
