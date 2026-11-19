@@ -373,7 +373,9 @@ void main() {
 
       await sut.onIosUpload(true, 20);
 
-      verify(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).called(1);
+      // 两次：onIosUpload 自己在起手同步一次，收尾补相册（_syncLinkedAlbums）
+      // 前再刷新一次远端相册状态。这是上游 #33162 的语义，详见 _syncLinkedAlbums。
+      verify(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).called(2);
       verify(() => mockBackgroundUploadService.uploadBackupCandidates(UserStub.admin.id)).called(1);
     });
   });
