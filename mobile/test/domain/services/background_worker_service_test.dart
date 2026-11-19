@@ -270,48 +270,44 @@ void main() {
     // 预算到点是我们自己喊停的，不是用户手动停止。若报 false，Kotlin 侧会
     // complete(Result.success())，即「干完了、别重排」，用户观感是「传一会儿
     // 就停，得反复开 App 推它」。这两条用例把这个语义钉住。
-    test('asks WorkManager to reschedule when it runs out of budget', () {
-      fakeAsync((async) {
-        when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) async => true);
-        final uploadService = MockForegroundUploadService();
-        // 上传一直挂着，模拟还没传完就被预算掐断
-        when(
-          () => uploadService.uploadCandidates(
-            any(),
-            any(),
-            callbacks: any(named: 'callbacks'),
-            useSequentialUpload: any(named: 'useSequentialUpload'),
-          ),
-        ).thenAnswer((invocation) {
-          // 预算到点时后台会用 cancelToken 取消上传，真实实现随即返回；
-          // 这里要跟着这个 token 结束，否则 Future 永远挂着，needsRetry 拿不到值。
-          final token = invocation.positionalArguments[1] as Completer<void>;
-          return token.future;
-        });
-
-        sut = BackgroundWorkerBgService(
-          dataController: MockDataController(),
-          apiService: MockApiService(),
-          overrides: [
-            localSyncServiceProvider.overrideWithValue(mockLocalSyncService),
-            syncStreamServiceProvider.overrideWithValue(mockRemoteSyncService),
-            hashServiceProvider.overrideWithValue(mockHashService),
-            currentUserProvider.overrideWith((ref) => CurrentUserProvider(mockUserService)),
-            foregroundUploadServiceProvider.overrideWithValue(uploadService),
-            backgroundUploadServiceProvider.overrideWithValue(mockBackgroundUploadService),
-            syncLinkedAlbumServiceProvider.overrideWithValue(mockSyncLinkedAlbumService),
-          ],
-        );
-
-        bool? needsRetry;
-        unawaited(sut.onAndroidUpload(20).then((value) => needsRetry = value));
-
-        // maxMinutes=20 => backupTimeout = 19 分钟
-        async.elapse(const Duration(minutes: 20, seconds: 5));
-        async.flushMicrotasks();
-
-        expect(needsRetry, isTrue, reason: '预算超时后必须要求重排');
+    test('asks WorkManager to reschedule when it runs out of budget', () async {
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) async => true);
+      final uploadService = MockForegroundUploadService();
+      // 上传一直挂着，模拟还没传完就被预算掐断
+      when(
+        () => uploadService.uploadCandidates(
+          any(),
+          any(),
+          callbacks: any(named: 'callbacks'),
+          useSequentialUpload: any(named: 'useSequentialUpload'),
+        ),
+      ).thenAnswer((invocation) {
+        // 预算到点时后台会用 cancelToken 取消上传，真实实现随即返回；
+        // 这里要跟着这个 token 结束，否则 Future 永远挂着，needsRetry 拿不到值。
+        final token = invocation.positionalArguments[1] as Completer<void>;
+        return token.future;
       });
+
+      sut = BackgroundWorkerBgService(
+        dataController: MockDataController(),
+        apiService: MockApiService(),
+        overrides: [
+          localSyncServiceProvider.overrideWithValue(mockLocalSyncService),
+          syncStreamServiceProvider.overrideWithValue(mockRemoteSyncService),
+          hashServiceProvider.overrideWithValue(mockHashService),
+          currentUserProvider.overrideWith((ref) => CurrentUserProvider(mockUserService)),
+          foregroundUploadServiceProvider.overrideWithValue(uploadService),
+          backgroundUploadServiceProvider.overrideWithValue(mockBackgroundUploadService),
+          syncLinkedAlbumServiceProvider.overrideWithValue(mockSyncLinkedAlbumService),
+        ],
+      );
+
+      // maxMinutes=1 => backupTimeout 为 0，计时器立刻触发。
+      // 不能用 fakeAsync：收尾的 _cleanup 要真的等文件/数据库句柄关掉，
+      // fakeAsync 里没有事件循环，Future 永远完成不了。
+      final needsRetry = await sut.onAndroidUpload(1).timeout(const Duration(seconds: 20));
+
+      expect(needsRetry, isTrue, reason: '预算超时后必须要求重排');
     });
 
     test('does not retry when the user cancels', () async {
