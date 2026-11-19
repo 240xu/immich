@@ -501,7 +501,11 @@ jobs:
           github_token: ${{ steps.token.outputs.token }}
 
       - name: Login to GitHub Container Registry
+<<<<<<< HEAD
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+=======
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+>>>>>>> v3.4.2
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -564,7 +568,11 @@ jobs:
         if: ${{ !cancelled() }}
 
       - name: Login to GitHub Container Registry
+<<<<<<< HEAD
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+=======
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+>>>>>>> v3.4.2
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -576,7 +584,11 @@ jobs:
         run: |
           for attempt in 1 2 3 4 5; do
             docker compose up -d --build --renew-anon-volumes --force-recreate --remove-orphans --wait --wait-timeout 300 2>&1 | tee "${RUNNER_TEMP}/docker-compose-up.log" && exit 0
+<<<<<<< HEAD
             grep -qiE 'toomanyrequests|retry-after' "${RUNNER_TEMP}/docker-compose-up.log" || exit 1
+=======
+            grep -q toomanyrequests "${RUNNER_TEMP}/docker-compose-up.log" || exit 1
+>>>>>>> v3.4.2
             sleep $((attempt * 15))
           done
           exit 1
@@ -659,7 +671,11 @@ jobs:
         if: ${{ !cancelled() }}
 
       - name: Login to GitHub Container Registry
+<<<<<<< HEAD
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+=======
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+>>>>>>> v3.4.2
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -671,7 +687,11 @@ jobs:
         run: |
           for attempt in 1 2 3 4 5; do
             docker compose up -d --build --renew-anon-volumes --force-recreate --remove-orphans --wait --wait-timeout 300 2>&1 | tee "${RUNNER_TEMP}/docker-compose-up.log" && exit 0
+<<<<<<< HEAD
             grep -qiE 'toomanyrequests|retry-after' "${RUNNER_TEMP}/docker-compose-up.log" || exit 1
+=======
+            grep -q toomanyrequests "${RUNNER_TEMP}/docker-compose-up.log" || exit 1
+>>>>>>> v3.4.2
             sleep $((attempt * 15))
           done
           exit 1

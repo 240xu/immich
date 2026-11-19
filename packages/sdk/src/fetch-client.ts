@@ -1,6 +1,6 @@
 /**
  * Immich
- * 3.4.0-rc.0
+ * 3.4.2
  * DO NOT MODIFY - This file has been generated using oazapfts.
  * See https://www.npmjs.com/package/oazapfts
  */
@@ -3278,6 +3278,8 @@ export type UserUpdateMeDto = {
     email?: string;
     /** User name */
     name?: string;
+    /** User password (deprecated, use change password endpoint) */
+    password?: string;
 };
 export type OnboardingResponseDto = {
     /** Is user onboarded */
@@ -8622,7 +8624,8 @@ export enum QueueJobStatus {
     Failed = "failed",
     Completed = "completed",
     Delayed = "delayed",
-    Waiting = "waiting"
+    Waiting = "waiting",
+    Paused = "paused"
 }
 export enum JobName {
     AssetDelete = "AssetDelete",
