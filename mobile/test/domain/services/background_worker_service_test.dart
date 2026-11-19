@@ -41,6 +41,9 @@ void main() {
   late MockBackgroundUploadService mockBackgroundUploadService;
   late MockForegroundUploadService mockForegroundUploadService;
   late MockSyncLinkedAlbumService mockSyncLinkedAlbumService;
+  late MockLocalSyncService mockLocalSyncService;
+  late MockHashService mockHashService;
+  late MockUserService mockUserService;
   late int albumSteps;
   late Drift db;
 
@@ -66,9 +69,9 @@ void main() {
   });
 
   setUp(() {
-    final mockLocalSyncService = MockLocalSyncService();
-    final mockHashService = MockHashService();
-    final mockUserService = MockUserService();
+    mockLocalSyncService = MockLocalSyncService();
+    mockHashService = MockHashService();
+    mockUserService = MockUserService();
     mockRemoteSyncService = MockSyncStreamService();
     mockBackgroundUploadService = MockBackgroundUploadService();
     mockForegroundUploadService = MockForegroundUploadService();
@@ -104,7 +107,7 @@ void main() {
   group('onAndroidUpload', () {
     setUp(() {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      when(() => mockRemoteSyncService.sync()).thenAnswer((_) async => true);
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) async => true);
     });
 
     tearDown(() => debugDefaultTargetPlatformOverride = TargetPlatform.iOS);
@@ -125,7 +128,7 @@ void main() {
 
       await sut.onAndroidUpload(20);
 
-      verify(() => mockRemoteSyncService.sync()).called(2);
+      verify(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).called(2);
       expect(albumSteps, 1);
     });
 
@@ -196,7 +199,7 @@ void main() {
   group('onIosUpload', () {
     test('lists a new batch only after the remote sync finished', () async {
       final remoteSync = Completer<bool>();
-      when(() => mockRemoteSyncService.sync()).thenAnswer((_) => remoteSync.future);
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) => remoteSync.future);
 
       final upload = sut.onIosUpload(true, 20);
       await pumpEventQueue();
@@ -208,7 +211,7 @@ void main() {
     });
 
     test('does not list a new batch when the remote sync fails', () async {
-      when(() => mockRemoteSyncService.sync()).thenAnswer((_) async => false);
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) async => false);
 
       await sut.onIosUpload(true, 20);
 
@@ -218,7 +221,7 @@ void main() {
     test('does not list a new batch when the run times out before the remote sync finished', () {
       fakeAsync((async) {
         final remoteSync = Completer<bool>();
-        when(() => mockRemoteSyncService.sync()).thenAnswer((_) => remoteSync.future);
+        when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) => remoteSync.future);
 
         unawaited(sut.onIosUpload(true, 20));
         async.elapse(const Duration(seconds: 20));
@@ -232,7 +235,7 @@ void main() {
 
     test('resumes pending uploads without waiting for the remote sync', () async {
       final remoteSync = Completer<bool>();
-      when(() => mockRemoteSyncService.sync()).thenAnswer((_) => remoteSync.future);
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) => remoteSync.future);
       when(
         () => mockBackgroundUploadService.getActiveTasks(kBackupGroup),
       ).thenAnswer((_) async => [UploadTask(url: 'https://example.com', filename: 'photo.jpg')]);
@@ -247,14 +250,14 @@ void main() {
 
     test('adds earlier uploads to their albums after the remote sync', () async {
       final remoteSync = Completer<bool>();
-      when(() => mockRemoteSyncService.sync()).thenAnswer((_) => remoteSync.future);
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) => remoteSync.future);
       when(
         () => mockBackgroundUploadService.getActiveTasks(kBackupGroup),
       ).thenAnswer((_) async => [UploadTask(url: 'https://example.com', filename: 'photo.jpg')]);
 
       final upload = sut.onIosUpload(true, 20);
       await pumpEventQueue();
-      verify(() => mockRemoteSyncService.sync()).called(1);
+      verify(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).called(1);
       expect(albumSteps, 0);
 
       remoteSync.complete(true);
@@ -269,7 +272,7 @@ void main() {
     // 就停，得反复开 App 推它」。这两条用例把这个语义钉住。
     test('asks WorkManager to reschedule when it runs out of budget', () {
       fakeAsync((async) {
-        when(() => mockRemoteSyncService.sync()).thenAnswer((_) async => true);
+        when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) async => true);
         final uploadService = MockForegroundUploadService();
         // 上传一直挂着，模拟还没传完就被预算掐断
         when(
@@ -279,16 +282,21 @@ void main() {
             callbacks: any(named: 'callbacks'),
             useSequentialUpload: any(named: 'useSequentialUpload'),
           ),
-        ).thenAnswer((_) => Completer<void>().future);
+        ).thenAnswer((invocation) {
+          // 预算到点时后台会用 cancelToken 取消上传，真实实现随即返回；
+          // 这里要跟着这个 token 结束，否则 Future 永远挂着，needsRetry 拿不到值。
+          final token = invocation.positionalArguments[1] as Completer<void>;
+          return token.future;
+        });
 
         sut = BackgroundWorkerBgService(
           dataController: MockDataController(),
           apiService: MockApiService(),
           overrides: [
-            localSyncServiceProvider.overrideWithValue(MockLocalSyncService()),
+            localSyncServiceProvider.overrideWithValue(mockLocalSyncService),
             syncStreamServiceProvider.overrideWithValue(mockRemoteSyncService),
-            hashServiceProvider.overrideWithValue(MockHashService()),
-            currentUserProvider.overrideWith((ref) => CurrentUserProvider(MockUserService())),
+            hashServiceProvider.overrideWithValue(mockHashService),
+            currentUserProvider.overrideWith((ref) => CurrentUserProvider(mockUserService)),
             foregroundUploadServiceProvider.overrideWithValue(uploadService),
             backgroundUploadServiceProvider.overrideWithValue(mockBackgroundUploadService),
             syncLinkedAlbumServiceProvider.overrideWithValue(mockSyncLinkedAlbumService),
@@ -307,7 +315,7 @@ void main() {
     });
 
     test('does not retry when the user cancels', () async {
-      when(() => mockRemoteSyncService.sync()).thenAnswer((_) async => true);
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) async => true);
       final uploadService = MockForegroundUploadService();
       final cancelToken = Completer<void>();
       when(
@@ -328,10 +336,10 @@ void main() {
         dataController: MockDataController(),
         apiService: MockApiService(),
         overrides: [
-          localSyncServiceProvider.overrideWithValue(MockLocalSyncService()),
+          localSyncServiceProvider.overrideWithValue(mockLocalSyncService),
           syncStreamServiceProvider.overrideWithValue(mockRemoteSyncService),
-          hashServiceProvider.overrideWithValue(MockHashService()),
-          currentUserProvider.overrideWith((ref) => CurrentUserProvider(MockUserService())),
+          hashServiceProvider.overrideWithValue(mockHashService),
+          currentUserProvider.overrideWith((ref) => CurrentUserProvider(mockUserService)),
           foregroundUploadServiceProvider.overrideWithValue(uploadService),
           backgroundUploadServiceProvider.overrideWithValue(mockBackgroundUploadService),
           syncLinkedAlbumServiceProvider.overrideWithValue(mockSyncLinkedAlbumService),
@@ -354,18 +362,18 @@ void main() {
 
       await sut.onIosUpload(true, 20);
 
-      verifyNever(() => mockRemoteSyncService.sync());
+      verifyNever(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal')));
       verifyNever(() => mockBackgroundUploadService.uploadBackupCandidates(any()));
       verifyNever(() => mockBackgroundUploadService.resume());
     });
 
     test('runs when the switch is on', () async {
       await SettingsRepository.instance.write(SettingsKey.backgroundSync, true);
-      when(() => mockRemoteSyncService.sync()).thenAnswer((_) async => true);
+      when(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).thenAnswer((_) async => true);
 
       await sut.onIosUpload(true, 20);
 
-      verify(() => mockRemoteSyncService.sync()).called(1);
+      verify(() => mockRemoteSyncService.sync(abortSignal: any(named: 'abortSignal'))).called(1);
       verify(() => mockBackgroundUploadService.uploadBackupCandidates(UserStub.admin.id)).called(1);
     });
   });

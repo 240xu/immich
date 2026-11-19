@@ -405,8 +405,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     }
 
     try {
-      // 先把远端相册状态同步下来，再用它决定哪些资产要补进相册
-      await _remoteSyncService.sync();
+      // 先把远端相册状态同步下来，再用它决定哪些资产要补进相册。
+      // 传 abortSignal 与 _syncAssets 保持一致，暂停/取消时能立刻中断。
+      await _remoteSyncService.sync(abortSignal: _cancellationToken.future);
       await _ref?.read(syncLinkedAlbumServiceProvider).syncLinkedAlbums(
         userId,
         cancellation: _cancellationToken,
