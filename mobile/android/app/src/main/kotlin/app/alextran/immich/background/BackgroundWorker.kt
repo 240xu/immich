@@ -64,12 +64,26 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
   }
 
   override fun startWork(): ListenableFuture<Result> {
+    // WorkManager can still hold a task queued before the user turned background
+    // sync off (or before an upgrade, where the key does not exist yet). Nothing
+    // else checks the switch on this path.
+    if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+      Log.i(TAG, "Background sync disabled, skipping worker start")
+      return Futures.immediateFuture(Result.success())
+    }
+
     if (!activeWorker.compareAndSet(null, this)) {
+      // Another worker already owns the upload. Reporting success keeps
+      // WorkManager's backoff from growing; the running worker is doing the work.
       Log.i(TAG, "Another background worker is running, skipping")
       return Futures.immediateFuture(Result.success())
     }
 
     if (BackgroundWorkerPreferences(ctx).isLocked() && BackgroundEngineLock.connectEngines > 0) {
+      // The foreground engine is mid-backup, so it is already doing what this
+      // worker would do. Report success rather than retry: a retry feeds
+      // WorkManager's exponential backoff every time a foreground backup overlaps
+      // a scheduled run, pushing the next attempt out to minutes.
       Log.i(TAG, "Foreground engine active, skipping background worker")
       activeWorker.compareAndSet(this, null)
       return Futures.immediateFuture(Result.success())
@@ -130,7 +144,9 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
    * This method acts as a bridge between the native Android background task system and Flutter.
    */
   override fun onInitialized() {
-    flutterApi?.onAndroidUpload(maxMinutesArg = 20) { handleHostResult(it) }
+    // 55 分钟：视频动辄数百 MB 到数 GB，20 分钟在真实带宽下传不完一轮，
+    // 而且每次重启都要重新扫描候选。Dart 侧会减 1 分钟留安全余量。
+    flutterApi?.onAndroidUpload(maxMinutesArg = 55) { handleHostResult(it) }
   }
 
   // TODO: Move this to a separate NotificationManager class
