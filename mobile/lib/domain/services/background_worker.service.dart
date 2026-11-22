@@ -57,6 +57,8 @@ class BackgroundWorkerFgService {
   // ignore: unused-code
   Future<void> disable() => _foregroundHostApi.disable();
 
+  Future<void> runNow() => _foregroundHostApi.runNow();
+
   Future<bool> wasLaunchedInBackground() => _foregroundHostApi.wasLaunchedInBackground();
 }
 
@@ -98,6 +100,10 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   bool get _isBackupEnabled => SettingsRepository.instance.appConfig.backup.enabled;
 
+  /// Whether the user has the background-sync switch on. Read from settings each
+  /// time: the background isolate gets no notification when the value changes.
+  bool get _isBackgroundSyncEnabled => SettingsRepository.instance.appConfig.backup.backgroundSync;
+
   Future<void> init() async {
     try {
       await Future.wait(
@@ -131,6 +137,13 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   @override
   Future<bool> onAndroidUpload(int? maxMinutes) async {
+    // Enforced here as well as in the native scheduler: WorkManager can hand us a
+    // run that was queued before the switch was turned off, and startWork() has no
+    // way to know the Dart-side setting.
+    if (!_isBackgroundSyncEnabled) {
+      _logger.info("Background sync is disabled. Skipping the whole run");
+      return false;
+    }
     final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
     final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
     await _optimizeDB();
@@ -143,6 +156,17 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   @override
   Future<void> onIosUpload(bool isRefresh, int? maxSeconds) async {
+    // iOS reschedules itself from handleBackgroundRefresh/handleBackgroundProcessing
+    // without consulting Dart, so the switch has to be enforced at this entry point
+    // or it does nothing on iOS at all.
+    if (!_isBackgroundSyncEnabled) {
+      _logger.info("Background sync is disabled. Skipping the whole run");
+      // Still has to run: this isolate opened its own database connection and
+      // provider container during bootstrap. Returning early left both open for
+      // the lifetime of the (now idle) background engine.
+      await _cleanup();
+      return;
+    }
     _logger.info('iOS background upload started with maxSeconds: ${maxSeconds}s');
     final sw = Stopwatch()..start();
     try {
@@ -153,11 +177,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         await _optimizeDB();
       }
 
-      // Run sync local, sync remote, hash and backup concurrently so the bg
-      // refresh task (20s budget) can make progress on all four instead of
-      // racing them sequentially. Hash tolerates stale reads, but a new backup
-      // batch waits for the remote sync. The single budget caps the
-      // whole batch; no phase needs its own timeout.
+      // Run the four phases concurrently so the bg refresh task (20s budget) can
+      // make progress on all of them. A new backup batch waits for the remote
+      // sync; the single budget caps the whole batch.
       final remoteSync = _remoteSyncService.sync();
       final all = Future.wait<dynamic>([
         _localSyncService.sync(),
@@ -207,16 +229,28 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       final backupFuture = _handleBackup(remoteSync: Future.value(true));
       Timer? cancelTimer;
+      // 预算超时是我们自己喊停的，语义上和「用户手动停止 / 系统回收」不同：
+      // 前者说明还有活没干完，应让 WorkManager 重排；后者重排只会再被杀一次。
+      var timedOut = false;
       if (backupTimeout != null) {
         cancelTimer = Timer(backupTimeout, () {
           if (!_cancellationToken.isCompleted) {
+            timedOut = true;
             _logger.warning("$debugLabel timed out after ${backupTimeout.inMinutes}m, cancelling backup");
             _cancellationToken.complete();
           }
         });
       }
       try {
-        return await backupFuture;
+        final needsRetry = await backupFuture;
+        // 预算到点被我们喊停时，本轮几乎必然还有待传文件：
+        // 报 false 会让 Kotlin 侧 complete(Result.success())，即「干完了」，
+        // 下次要等周期任务或用户开 App 才继续，观感就是「传一会儿就停」。
+        if (timedOut) {
+          _logger.info("$debugLabel hit its budget, asking WorkManager to reschedule");
+          return true;
+        }
+        return needsRetry;
       } finally {
         cancelTimer?.cancel();
       }
@@ -295,6 +329,14 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       if (!_isBackupEnabled) {
         _logger.info("Backup is disabled. Skipping backup routine");
+        return false;
+      }
+
+      // Enforced here as well as in the native schedulers: WorkManager can hand us
+      // a run queued before the switch was turned off, and iOS reschedules itself
+      // without consulting Dart. Every platform funnels through here.
+      if (!_isBackgroundSyncEnabled) {
+        _logger.info("Background sync is disabled. Skipping backup routine");
         return false;
       }
 

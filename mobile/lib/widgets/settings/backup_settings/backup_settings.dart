@@ -15,6 +15,7 @@ import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_ui/immich_ui.dart';
+import 'package:logging/logging.dart';
 
 class BackupSettings extends StatelessWidget {
   const BackupSettings({super.key});
@@ -31,11 +32,36 @@ class BackupSettings extends StatelessWidget {
           SettingGroupTitle(title: context.t.background_options, icon: Icons.charging_station_rounded),
           const _BackupOnlyWhenChargingButton(),
           const _BackupDelaySlider(),
+          const _BackgroundSyncSwitch(),
         ],
         const Divider(),
         SettingGroupTitle(title: context.t.backup_albums_sync, icon: Icons.sync),
         const _AlbumSyncActionButton(),
       ],
+    );
+  }
+}
+
+class _BackgroundSyncSwitch extends ConsumerWidget {
+  const _BackgroundSyncSwitch();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final service = ref.watch(backgroundWorkerFgServiceProvider);
+    return _BackupSwitchTile(
+      metadataKey: SettingsKey.backgroundSync,
+      selector: (c) => c.backup.backgroundSync,
+      title: context.t.background_sync,
+      subtitle: context.t.background_sync_description,
+      onChanged: (value) async {
+        if (value) {
+          await service.configure();
+          await service.enable();
+          await service.runNow();
+        } else {
+          await service.disable();
+        }
+      },
     );
   }
 }
@@ -151,7 +177,9 @@ class _BackupSwitchTile extends ConsumerWidget {
   final bool Function(AppConfig) selector;
   final String title;
   final String subtitle;
-  final void Function(bool)? onChanged;
+  /// Awaitable so the tile can surface a failure in the native side instead of
+  /// dropping it: several of these switches schedule or cancel background work.
+  final Future<void> Function(bool)? onChanged;
 
   const _BackupSwitchTile({
     required this.metadataKey,
@@ -173,7 +201,15 @@ class _BackupSwitchTile extends ConsumerWidget {
           value: value,
           onChanged: (bool newValue) async {
             await ref.read(settingsProvider).write(metadataKey, newValue);
-            onChanged?.call(newValue);
+            // Values this switch writes decide whether native work gets scheduled,
+            // so a failure there must not be swallowed. Callers do not await this
+            // callback (the tile would unmount), so report it instead of dropping
+            // it -- silence here previously hid a thrown runNow().
+            try {
+              await onChanged?.call(newValue);
+            } catch (error, stackTrace) {
+              Logger('BackupSettings').warning("Failed to apply $metadataKey = $newValue", error, stackTrace);
+            }
           },
         ),
       ),
@@ -220,9 +256,7 @@ class _BackupOnlyWhenChargingButton extends ConsumerWidget {
       selector: (c) => c.backup.requireCharging,
       title: context.t.charging,
       subtitle: context.t.charging_requirement_mobile_backup,
-      onChanged: (value) {
-        unawaited(fgService.configure(requireCharging: value));
-      },
+      onChanged: (value) => fgService.configure(requireCharging: value),
     );
   }
 }
