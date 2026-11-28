@@ -15,6 +15,7 @@ import 'package:immich_mobile/domain/services/sync_stream.service.dart';
 // ignore: library_prefixes
 import 'package:immich_mobile/entities/store.entity.dart' as dbStore;
 import 'package:immich_mobile/extensions/platform_extensions.dart';
+import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/platform/background_worker_api.g.dart';
 import 'package:immich_mobile/platform/background_worker_lock_api.g.dart';
@@ -271,6 +272,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       _ref?.dispose();
       _ref = null;
+
+      // This isolate built its own Cronet engine. Release it now: the isolate is
+      // about to be torn down and the engine otherwise keeps its native threads
+      // and 64 MiB cache alive until the process exits.
+      NetworkRepository.dispose();
     } catch (error, stack) {
       dPrint(() => 'Failed to cleanup background worker: $error with stack: $stack');
     }

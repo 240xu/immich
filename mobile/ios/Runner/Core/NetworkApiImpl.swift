@@ -104,6 +104,38 @@ class NetworkApiImpl: NetworkApi {
   func clearCookies() throws {
     URLSessionManager.clearCookies()
   }
+
+    /// Headers the native client would attach to [url]: the user-configured headers
+    /// plus the session cookies for that host.
+    ///
+    /// Only used by the Android Cronet path, which cannot read the native client's
+    /// configuration the way OkHttp interceptors can. Implemented on iOS so the
+    /// Pigeon protocol is satisfied.
+  func requestAuthHeaders(url: String) throws -> [String: String] {
+    var headers = UserDefaults.group.dictionary(forKey: HEADERS_KEY) as? [String: String] ?? [:]
+    headers["User-Agent"] = headers["User-Agent"] ?? URLSessionManager.userAgent
+
+    guard let requestUrl = URL(string: url), let host = requestUrl.host else {
+      return headers
+    }
+
+    let cookies = URLSessionManager.cookieStorage.cookies(for: requestUrl) ?? []
+    let sessionCookies = cookies.filter { AuthCookie.names.contains($0.name) }
+    if !sessionCookies.isEmpty {
+      headers["Cookie"] = sessionCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    }
+    return headers
+  }
+
+  func getCronetUserAgent() throws -> String {
+    URLSessionManager.userAgent
+  }
+
+  /// Cronet stores its cache on disk; iOS has no Cronet engine, so this is only
+  /// here to satisfy the protocol.
+  func getCronetStoragePath() throws -> String {
+    FileManager.default.temporaryDirectory.appendingPathComponent("cronet").path
+  }
 }
 
 private class CertImporter: NSObject, UIDocumentPickerDelegate {

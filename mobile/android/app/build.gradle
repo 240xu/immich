@@ -85,6 +85,14 @@ flutter {
   source '../..'
 }
 
+// media3-datasource-cronet 会通过传递依赖拉进 play-services-cronet，它的
+// GooglePlayServicesCronetProvider 会被 CronetEngine.Builder 优先选中，版本由
+// Play 商店推送、不受本包控制，也就无法保证 X25519MLKEM768。全局排除后，
+// provider 选择只剩 App-Packaged-Cronet-Provider（cronet.embedded）。
+configurations.all {
+  exclude group: 'com.google.android.gms', module: 'play-services-cronet'
+}
+
 dependencies {
   implementation libs.okhttp
   implementation libs.cronet.embedded
