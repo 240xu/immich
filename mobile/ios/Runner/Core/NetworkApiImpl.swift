@@ -136,6 +136,35 @@ class NetworkApiImpl: NetworkApi {
   func getCronetStoragePath() throws -> String {
     FileManager.default.temporaryDirectory.appendingPathComponent("cronet").path
   }
+
+  func uploadFileStreaming(
+    url: String,
+    filePath: String,
+    fileName: String,
+    fileFieldName: String,
+    mimeType: String?,
+    fields: [String: String],
+    progressKey: String,
+    completion: @escaping (Result<StreamingUploadResult, any Error>) -> Void
+  ) {
+      // iOS uses URLSession, which streams by itself, so the Dart client is the
+      // supported path and this entry point is never taken.
+    completion(
+      .success(
+        StreamingUploadResult(
+          isSuccess: false,
+          statusCode: 0,
+          body: nil,
+          errorMessage: "Streaming upload is only implemented on Android",
+          bytesSent: 0
+        )
+      )
+    )
+  }
+
+  func cancelStreamingUpload(progressKey: String) throws {
+    // No-op: see uploadFileStreaming.
+  }
 }
 
 private class CertImporter: NSObject, UIDocumentPickerDelegate {

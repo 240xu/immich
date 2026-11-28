@@ -19,6 +19,7 @@ import 'package:immich_mobile/infrastructure/repositories/network.repository.dar
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/platform/background_worker_api.g.dart';
 import 'package:immich_mobile/platform/background_worker_lock_api.g.dart';
+import 'package:immich_mobile/platform/network_api.g.dart';
 import 'package:immich_mobile/providers/backup/backup.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
@@ -71,6 +72,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
   late HashService _hashService;
 
   bool _isCleanedUp = false;
+
+  /// Upper bound on the remote sync that primes a background backup. Without it
+  /// a stalled request leaves the worker RUNNING indefinitely with no log line
+  /// and no upload.
+  static const remoteSyncTimeout = Duration(minutes: 2);
 
   BackgroundWorkerBgService({
     required this._dataController,
@@ -310,6 +316,7 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       var failed = 0;
       var unlinked = 0;
       Future<void>? albumSync;
+      var cancelled = 0;
       await uploadService?.uploadCandidates(
         currentUser.id,
         _cancellationToken,
@@ -322,14 +329,21 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
               albumSync = _syncLinkedAlbums(currentUser.id).whenComplete(() => albumSync = null);
             }
           },
-          onError: (_, _) => failed += 1,
+          onError: (_, _) => failed++,
+          // Tracked separately from failures: a cancel means the run was stopped
+          // (timeout, user stop, app idle), so it must not turn into a retry.
+          onCancelled: (_) => cancelled++,
         ),
         useSequentialUpload: true,
       );
       await albumSync;
-      _logger.info("Background backup finished, $failed uploads failed");
+      _logger.info("Background backup finished, $failed uploads failed, $cancelled cancelled");
       await _syncLinkedAlbums(currentUser.id);
-      // Retry when at least one upload failed
+      // A cancellation is not a reason to retry -- whatever cancelled this run
+      // will cancel the next one too.
+      if (cancelled > 0 && failed == 0) {
+        return false;
+      }
       return failed > 0;
     }, (error, stack) => dPrint(() => "Error in backup zone $error, $stack"));
     return needsRetry ?? true;
@@ -354,11 +368,31 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
       return false;
     }
 
-    final isSuccess = await _remoteSyncService.sync();
+    // A remote sync that never returns wedges the whole run. The timeout needs its
+    // own abort signal: Future.timeout() only completes the outer Future, so
+    // without it the abandoned sync keeps writing to a closed database.
+    final syncAbort = Completer<void>();
+    final isSuccess = await _remoteSyncService
+        .sync(abortSignal: syncAbort.future)
+        .timeout(
+          remoteSyncTimeout,
+          onTimeout: () {
+            _logger.warning("Remote sync timed out after ${remoteSyncTimeout.inSeconds}s, aborting");
+            // Treat the timeout as a failed sync so the caller skips the backup
+            // instead of uploading against an unknown remote state.
+            if (!syncAbort.isCompleted) {
+              syncAbort.complete();
+            }
+            return false;
+          },
+        );
     if (_isCleanedUp) {
       return isSuccess;
     }
 
+    // Hash regardless of isSuccess, matching upstream: hashing is local work and
+    // its result is needed by later runs, so skipping it on a failed sync only
+    // defers the cost. (The 2-minute timeout above is the only added bound.)
     var hashFuture = _hashService.hashAssets();
     if (hashTimeout != null) {
       hashFuture = hashFuture.timeout(
@@ -397,6 +431,11 @@ class BackgroundWorkerLockService {
 Future<void> backgroundSyncNativeEntrypoint() async {
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+
+  // This runs in the worker's own isolate, which does not inherit the handler
+  // registered in main(). Without it every progress tick from the native
+  // streaming uploader arrives with no listener and is logged as an error.
+  StreamingUploadProgressApi.setUp(StreamingUploadProgressHandler());
 
   final (dataController, apiService) = await Bootstrap.initDomain(shouldBufferLogs: false, disableStoreWatching: true);
   await BackgroundWorkerBgService(dataController: dataController, apiService: apiService).init();
