@@ -64,12 +64,19 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
   }
 
   override fun startWork(): ListenableFuture<Result> {
+    // 开关关掉之前排进去的任务，WorkManager 还会留着。
+    if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+      Log.i(TAG, "Background sync disabled, skipping worker start")
+      return Futures.immediateFuture(Result.success())
+    }
+
     if (!activeWorker.compareAndSet(null, this)) {
       Log.i(TAG, "Another background worker is running, skipping")
       return Futures.immediateFuture(Result.success())
     }
 
     if (BackgroundWorkerPreferences(ctx).isLocked() && BackgroundEngineLock.connectEngines > 0) {
+      // 这里重试会顺着退避把下一次往后推。
       Log.i(TAG, "Foreground engine active, skipping background worker")
       activeWorker.compareAndSet(this, null)
       return Futures.immediateFuture(Result.success())
@@ -130,7 +137,9 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
    * This method acts as a bridge between the native Android background task system and Flutter.
    */
   override fun onInitialized() {
-    flutterApi?.onAndroidUpload(maxMinutesArg = 20) { handleHostResult(it) }
+    // 55 分钟：视频动辄数百 MB 到数 GB，20 分钟在真实带宽下传不完一轮，
+    // 而且每次重启都要重新扫描候选。Dart 侧会减 1 分钟留安全余量。
+    flutterApi?.onAndroidUpload(maxMinutesArg = 55) { handleHostResult(it) }
   }
 
   // TODO: Move this to a separate NotificationManager class
@@ -194,6 +203,13 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
    */
   override fun onStopped() {
     Log.d(TAG, "About to stop BackupWorker")
+    // close() 报的是 Result.failure，WorkManager 当成「以后别再跑」。
+    if (!isComplete && !BackgroundWorkerApiImpl.explicitlyCancelled &&
+      BackgroundWorkerPreferences(ctx).isSyncEnabled()
+    ) {
+      Log.i(TAG, "Stopped by the system, scheduling another run")
+      BackgroundWorkerApiImpl.enqueueBackgroundWorkerWhenConnected(ctx)
+    }
     close()
   }
 

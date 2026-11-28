@@ -222,6 +222,15 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
     if (_ref.read(authProvider).isAuthenticated) {
       _ref.read(backupProvider.notifier).stopForegroundBackup(reason: "the app being sent to the background");
 
+      if (CurrentPlatform.isAndroid && _ref.read(appConfigProvider).backup.backgroundSync) {
+        // 抛出去会跳过下面的 websocket.disconnect。
+        try {
+          unawaited(_ref.read(backgroundWorkerFgServiceProvider).runNow().catchError((_) {}));
+        } catch (error, stack) {
+          _log.warning("Failed to enqueue the background worker", error, stack);
+        }
+      }
+
       _ref.read(websocketProvider.notifier).disconnect();
     }
 

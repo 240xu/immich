@@ -26,6 +26,13 @@ class BackgroundWorkerApiImpl: BackgroundWorkerFgHostApi {
     return BackgroundWorkerApiImpl.launchedInBackground
   }
 
+    /// BGTaskScheduler 只是收下请求，什么时候跑由它定。
+  func runNow() throws {
+    BackgroundWorkerApiImpl.scheduleRefreshWorker()
+    BackgroundWorkerApiImpl.scheduleProcessingWorker()
+    print("BackgroundWorkerApiImpl:runNow Requested an immediate background run")
+  }
+
   // Stays false until iOS runs one of the background tasks
   private static var launchedInBackground = false
   private static let taskIDs = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as! [String]

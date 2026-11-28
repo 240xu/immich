@@ -56,6 +56,8 @@ class BackgroundWorkerFgService {
   // ignore: unused-code
   Future<void> disable() => _foregroundHostApi.disable();
 
+  Future<void> runNow() => _foregroundHostApi.runNow();
+
   Future<bool> wasLaunchedInBackground() => _foregroundHostApi.wasLaunchedInBackground();
 }
 
@@ -92,6 +94,9 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   bool get _isBackupEnabled => SettingsRepository.instance.appConfig.backup.enabled;
 
+  /// 每次都重读，这个 isolate 收不到值变化的通知。
+  bool get _isBackgroundSyncEnabled => SettingsRepository.instance.appConfig.backup.backgroundSync;
+
   Future<void> init() async {
     try {
       await Future.wait(
@@ -125,6 +130,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   @override
   Future<bool> onAndroidUpload(int? maxMinutes) async {
+    // 开关关掉之前排进去的任务，WorkManager 还会留着。
+    if (!_isBackgroundSyncEnabled) {
+      _logger.info("Background sync is disabled. Skipping the whole run");
+      return false;
+    }
     final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
     final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
     await _optimizeDB();
@@ -137,6 +147,12 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
   @override
   Future<void> onIosUpload(bool isRefresh, int? maxSeconds) async {
+    // iOS 自己重排，不问 Dart。
+    if (!_isBackgroundSyncEnabled) {
+      _logger.info("Background sync is disabled. Skipping the whole run");
+      await _cleanup();
+      return;
+    }
     _logger.info('iOS background upload started with maxSeconds: ${maxSeconds}s');
     final sw = Stopwatch()..start();
     try {
@@ -147,11 +163,8 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         await _optimizeDB();
       }
 
-      // Run sync local, sync remote, hash and backup concurrently so the bg
-      // refresh task (20s budget) can make progress on all four instead of
-      // racing them sequentially. Hash tolerates stale reads, but a new backup
-      // batch waits for the remote sync. The single budget caps the
-      // whole batch; no phase needs its own timeout.
+      // 四个阶段并发跑，20 秒的后台刷新任务才能都推进一点。
+      // 新的上传批次要等远端同步，整批共用一个预算。
       final remoteSync = _remoteSyncService.sync();
       final all = Future.wait<dynamic>([
         _localSyncService.sync(),
@@ -201,16 +214,25 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       final backupFuture = _handleBackup(remoteSync: Future.value(true));
       Timer? cancelTimer;
+      // 我们自己喊停的，和用户手动停止不是一回事。
+      var timedOut = false;
       if (backupTimeout != null) {
         cancelTimer = Timer(backupTimeout, () {
           if (!_cancellationToken.isCompleted) {
+            timedOut = true;
             _logger.warning("$debugLabel timed out after ${backupTimeout.inMinutes}m, cancelling backup");
             _cancellationToken.complete();
           }
         });
       }
       try {
-        return await backupFuture;
+        final needsRetry = await backupFuture;
+        // 报 false 会被当成干完了，下一轮要等一小时。
+        if (timedOut) {
+          _logger.info("$debugLabel hit its budget, asking WorkManager to reschedule");
+          return true;
+        }
+        return needsRetry;
       } finally {
         cancelTimer?.cancel();
       }
@@ -284,6 +306,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
 
       if (!_isBackupEnabled) {
         _logger.info("Backup is disabled. Skipping backup routine");
+        return false;
+      }
+
+      if (!_isBackgroundSyncEnabled) {
+        _logger.info("Background sync is disabled. Skipping backup routine");
         return false;
       }
 

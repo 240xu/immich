@@ -12,11 +12,14 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
     private const val SHARED_PREF_LOCK_KEY = "BackgroundWorker::isLocked"
     private const val SHARED_PREF_NOTIF_TITLE_KEY = "BackgroundWorker::notificationTitle"
     private const val SHARED_PREF_NOTIF_MSG_KEY = "BackgroundWorker::notificationMessage"
+    private const val SHARED_PREF_SYNC_ENABLED_KEY = "BackgroundWorker::syncEnabled"
 
     private const val DEFAULT_MIN_DELAY_SECONDS = 30L
     private const val DEFAULT_REQUIRE_CHARGING = false
     private const val DEFAULT_NOTIF_TITLE = "Uploading media"
     private const val DEFAULT_NOTIF_MSG = "Checking for new assets…"
+    // 要和 BackupConfig.backgroundSync 一致。Dart 写之前就读的是它。
+    private const val DEFAULT_SYNC_ENABLED = true
   }
 
   private val sp: SharedPreferences by lazy {
@@ -64,6 +67,16 @@ class BackgroundWorkerPreferences(private val ctx: Context) {
 
   fun isLocked(): Boolean {
     return sp.getBoolean(SHARED_PREF_LOCK_KEY, true)
+  }
+
+  fun setSyncEnabled(enabled: Boolean) {
+    sp.edit {
+      putBoolean(SHARED_PREF_SYNC_ENABLED_KEY, enabled)
+    }
+  }
+
+  fun isSyncEnabled(): Boolean {
+    return sp.getBoolean(SHARED_PREF_SYNC_ENABLED_KEY, DEFAULT_SYNC_ENABLED)
   }
 }
 

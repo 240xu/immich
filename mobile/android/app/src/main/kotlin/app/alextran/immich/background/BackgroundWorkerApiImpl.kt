@@ -20,6 +20,8 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
   private val ctx: Context = context.applicationContext
 
   override fun enable() {
+    BackgroundWorkerPreferences(ctx).setSyncEnabled(true)
+    BackgroundWorkerApiImpl.explicitlyCancelled = false
     enqueueMediaObserver(ctx)
     enqueuePeriodicWorker(ctx)
   }
@@ -30,11 +32,18 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
 
   override fun configure(settings: BackgroundWorkerSettings) {
     BackgroundWorkerPreferences(ctx).updateSettings(settings)
+    // 改别的选项不能把 worker 又拉起来。
+    if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+      Log.i(TAG, "Background sync disabled, not rescheduling after configure")
+      return
+    }
     enqueueMediaObserver(ctx)
     enqueuePeriodicWorker(ctx)
   }
 
   override fun disable() {
+    BackgroundWorkerPreferences(ctx).setSyncEnabled(false)
+    BackgroundWorkerApiImpl.explicitlyCancelled = true
     WorkManager.getInstance(ctx).apply {
       cancelUniqueWork(OBSERVER_WORKER_NAME)
       cancelUniqueWork(BACKGROUND_WORKER_NAME)
@@ -49,6 +58,10 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     return false
   }
 
+  override fun runNow() {
+    enqueueBackgroundWorker(ctx)
+  }
+
   companion object {
     private const val BACKGROUND_WORKER_NAME = "immich/BackgroundWorkerV1"
     private const val RETRY_WORKER_NAME = "immich/BackgroundWorkerRetryV1"
@@ -56,6 +69,10 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     private const val PERIODIC_WORKER_NAME = "immich/PeriodicBackgroundWorkerV1"
     const val ENGINE_CACHE_KEY = "immich::background_worker::engine"
     const val RETRY_TAG = "immich/retryWhenConnected"
+
+    /// onStopped() 分不出是系统停的还是自己要停的。
+    @Volatile
+    var explicitlyCancelled = false
 
 
     fun enqueueMediaObserver(ctx: Context) {
@@ -104,7 +121,15 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     }
 
     fun enqueueBackgroundWorker(ctx: Context) {
-      val constraints = Constraints.Builder().setRequiresBatteryNotLow(true).build()
+      if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+        Log.i(TAG, "Background sync disabled, skipping enqueue")
+        return
+      }
+      val settings = BackgroundWorkerPreferences(ctx).getSettings()
+      val constraints = Constraints.Builder().apply {
+        setRequiresBatteryNotLow(true)
+        setRequiresCharging(settings.requiresCharging)
+      }.build()
       val work = OneTimeWorkRequestBuilder<BackgroundWorker>()
         .setConstraints(constraints)
         .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
@@ -116,6 +141,10 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     }
 
     fun enqueueBackgroundWorkerWhenConnected(ctx: Context) {
+      if (!BackgroundWorkerPreferences(ctx).isSyncEnabled()) {
+        Log.i(TAG, "Background sync disabled, skipping retry enqueue")
+        return
+      }
       val settings = BackgroundWorkerPreferences(ctx).getSettings()
       val constraints = Constraints.Builder().apply {
         setRequiredNetworkType(NetworkType.CONNECTED)
@@ -127,6 +156,7 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
         .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
         .addTag(RETRY_TAG)
         .build()
+      // 用 KEEP：替换会把正在跑的重试取消掉。
       WorkManager.getInstance(ctx)
         .enqueueUniqueWork(RETRY_WORKER_NAME, ExistingWorkPolicy.KEEP, work)
 
@@ -140,6 +170,7 @@ class BackgroundWorkerApiImpl(context: Context) : BackgroundWorkerFgHostApi {
     }
 
     fun cancelBackgroundWorker(ctx: Context) {
+      explicitlyCancelled = true
       WorkManager.getInstance(ctx).cancelUniqueWork(BACKGROUND_WORKER_NAME)
       WorkManager.getInstance(ctx).cancelUniqueWork(RETRY_WORKER_NAME)
       FlutterEngineCache.getInstance().remove(ENGINE_CACHE_KEY)
