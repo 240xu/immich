@@ -640,7 +640,7 @@
   "background_location_permission_content": "为了在后台运行时实现网络切换，Immich必须始终拥有精确位置访问权限，以便应用能够读取 Wi-Fi 网络的名称",
   "background_options": "后台选项",
   "background_sync": "后台同步和上传",
-  "background_sync_description": "应用处于后台时继续同步和上传。会消耗更多电量。",
+  "background_sync_description": "应用会在后台持续同步和上传，会消耗更多电量。",
   "backup": "备份",
   "backup_album_selection_page_albums_tap": "单击包含，双击排除",
   "backup_album_selection_page_assets_scatter": "资源可以分散在多个相册中。因此，在备份过程中，可以包含或排除某些相册。",
